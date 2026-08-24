@@ -53,7 +53,7 @@ KNOWN_TOPICS = [
 KNOWN_DOC_KINDS = ["question", "summary", "answer", "index", "readme", "post"]
 
 REWRITE_SYSTEM = (
-    "너는 개발 공부 노트 검색 시스템의 질의 분석기다. /no_think\n"
+    "너는 개발 공부 노트 검색 시스템의 질의 분석기다.\n"
     "사용자 검색어를 분석해 JSON으로만 답한다. 설명 금지.\n"
     "- intent: 무엇을 찾으려는지 한 줄\n"
     "- keywords: 검색 핵심 키워드 (원문 언어 유지)\n"
