@@ -6,3 +6,4 @@
 | 2 | 스키마 위반 재시도 1회로 충분한지 (qwen3:8b 실측) | wrapper-api.md D4 | 미검증 |
 | 3 | OLLAMA_KEEP_ALIVE 값 (콜드스타트 vs VRAM 상주) | wrapper-api.md D6 | 미검증 |
 | 4 | 로그 Redis 백오프 30s·MAXLEN 10000 적정성 | wrapper-api.md D9 | 미검증 |
+| 5 | think:false + num_predict=512 — 폭주 재발 여부·응답 지연 실측 | wrapper-api.md D2 | 2026-08-24 1차 실측 예정 |

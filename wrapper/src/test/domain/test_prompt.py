@@ -16,7 +16,7 @@ def test_rewrite_messages_embeds_candidates_and_query():
         assert topic in system["content"]
     for doc_kind in KNOWN_DOC_KINDS:
         assert doc_kind in system["content"]
-    assert "/no_think" in system["content"]   # thinking 비활성 (design D2)
+    assert "/no_think" not in system["content"]   # thinking 비활성은 API think:false (design D2)
 
 
 def test_rewrite_result_requires_keywords():

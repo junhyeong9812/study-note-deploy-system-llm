@@ -32,8 +32,12 @@ async def _chat(client: httpx.AsyncClient, model: str, messages: list[dict],
                 "model": model,
                 "messages": messages,
                 "stream": False,
+                "think": False,            # qwen3 thinking 비활성 — 프롬프트 소프트 스위치는
+                                           # ollama 템플릿에서 무시됨 (.164 실측: 폭주 생성)
                 "format": schema,          # 1단: Ollama 구조화 출력 강제
-                "options": {"temperature": 0},
+                # num_predict 상한 — 폭주 생성 가드레일. 클라이언트가 타임아웃으로 끊어도
+                # ollama는 서버측 생성을 계속하므로(실측 31k 토큰) 상한이 유일한 방어선
+                "options": {"temperature": 0, "num_predict": 512},
             },
             timeout=timeout,
         )

@@ -18,7 +18,7 @@ backend ──HTTP──▶ wrapper :8000 (LAN 노출 유일)
 
 | 경로 | 역할 | 타임아웃 | 출력 스키마 |
 |---|---|---|---|
-| `POST /rewrite` | 검색어 → 구조화 질의. thinking 비활성(`/no_think`) | **총예산** 5s (재시도 포함) | `{intent, keywords[], expanded[], filters{topic?, doc_kind?}}` |
+| `POST /rewrite` | 검색어 → 구조화 질의. thinking 비활성(**API `think:false`** — 프롬프트 `/no_think` 소프트 스위치는 ollama 템플릿이 무시, 실측) + `num_predict` 상한(폭주 가드레일) | **총예산** 5s (재시도 포함) | `{intent, keywords[], expanded[], filters{topic?, doc_kind?}}` |
 | `POST /digest` | 검색 청크들 → 한국어 다이제스트 (2차 범위 — 계약만 예약) | 30s | `{summary, source_paths[]}` |
 | `GET /health` | ollama `/api/tags` 도달 + 모델 존재 확인 | 2s | `{status, model}` |
 
