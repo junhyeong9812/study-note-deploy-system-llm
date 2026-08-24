@@ -6,10 +6,10 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from domain.prompt import DigestIn, RewriteResult
-from logger import log
-from usecase import rewrite
-from validate import SchemaViolation
+from app.domain.prompt import DigestIn, RewriteResult
+from app.logger import log
+from app.usecase import rewrite
+from app.validate import SchemaViolation
 
 router = APIRouter()
 

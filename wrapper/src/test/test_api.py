@@ -7,8 +7,8 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from app import app
-from logger import format_line
+from app.app import app
+from app.logger import format_line
 
 OLLAMA = "http://ollama:11434"
 GOOD = ('{"intent":"LSM 트리 검색","keywords":["LSM-Tree"],'

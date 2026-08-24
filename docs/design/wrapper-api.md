@@ -62,14 +62,19 @@ wrapper/
 
 ```
 wrapper/
-  app.py        # 프레임워크 구동 설정 — FastAPI 인스턴스·lifespan(세마포어·ollama http client)
-  api.py        # 라우터 — /rewrite /digest /health (HTTP 관심사만)
-  domain/
-    prompt.py   # 도메인 — 역할별 프롬프트 + 출력 pydantic 스키마 (이 리포의 존재 이유)
-  usecase/
-    rewrite.py  # 유즈케이스 — 세마포어 획득→ollama 호출→검증·재시도→응답 조립
-  validate.py   # 검증 정책 — pydantic 파싱, 오류 피드백 재시도 1회, 422 확정
+  pyproject.toml        # pytest 설정 (pythonpath=src, testpaths=src/test)
   Dockerfile
+  src/
+    app/                # 코드 (패키지 — 절대 임포트 `from app...`)
+      app.py            # 프레임워크 구동 설정 — FastAPI 인스턴스·lifespan(세마포어·ollama http client)
+      api.py            # 라우터 — /rewrite /digest /health (HTTP 관심사만)
+      domain/prompt.py  # 도메인 — 역할별 프롬프트 + 입출력 pydantic 스키마 (이 리포의 존재 이유)
+      usecase/rewrite.py# 유즈케이스 — 세마포어 획득→총예산→ollama 호출→검증·재시도
+      validate.py       # 검증 정책 — pydantic 파싱, 오류 피드백 재시도 1회, 422 확정
+      logger.py         # 로그 규약 구현 (D9)
+    test/               # app/ 미러 — 모듈별 단위 + test_api.py 통합
+      test_api.py · test_validate.py · test_logger.py
+      domain/test_prompt.py · usecase/test_rewrite.py
 ```
 - 의존 방향: api → usecase → (domain, validate). domain은 **내부 계층을 import하지 않는다**(표준 라이브러리·pydantic은 허용).
 

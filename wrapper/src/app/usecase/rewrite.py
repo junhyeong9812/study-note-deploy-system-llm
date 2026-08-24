@@ -6,9 +6,9 @@ import asyncio
 
 import httpx
 
-from domain.prompt import RewriteResult, rewrite_messages
-from logger import log
-from validate import parse_with_retry
+from app.domain.prompt import RewriteResult, rewrite_messages
+from app.logger import log
+from app.validate import parse_with_retry
 
 
 class Busy(Exception):
