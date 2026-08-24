@@ -1,4 +1,6 @@
-"""거절·검증·재시도 경로 우선 (spec ⑤). ollama는 respx로 mock."""
+"""거절·검증·재시도·업스트림 이상 경로 우선 (spec ⑤). ollama는 respx로 mock."""
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -7,35 +9,40 @@ from fastapi.testclient import TestClient
 from app import app
 
 OLLAMA = "http://ollama:11434"
+GOOD = ('{"intent":"LSM 트리 검색","keywords":["LSM-Tree"],'
+        '"expanded":["Log-Structured Merge"],"filters":{"topic":"cs","doc_kind":"summary"}}')
+BAD = '{"intent":"x"}'  # keywords 누락
 
 
 def chat_json(content: str):
     return httpx.Response(200, json={"message": {"content": content}})
 
 
-GOOD = '{"intent":"LSM 트리 검색","keywords":["LSM-Tree"],"expanded":["Log-Structured Merge"],"topics":["cs"]}'
-BAD = '{"intent":"x"}'  # keywords 누락
+def rewrite_body(query: str = "q"):
+    return {"query": query}
 
 
 @pytest.fixture
 def client():
-    with TestClient(app) as c:   # lifespan 실행
-        yield c
+    with TestClient(app) as test_client:   # lifespan 실행
+        yield test_client
 
 
 @respx.mock
 def test_rewrite_ok(client):
     respx.post(f"{OLLAMA}/api/chat").mock(return_value=chat_json(GOOD))
-    response = client.post("/rewrite", json={"query": "lsm tree가 뭐지"})
+    response = client.post("/rewrite", json=rewrite_body("lsm tree가 뭐지"))
     assert response.status_code == 200
-    assert response.json()["keywords"] == ["LSM-Tree"]
+    body = response.json()
+    assert body["keywords"] == ["LSM-Tree"]
+    assert body["filters"] == {"topic": "cs", "doc_kind": "summary"}   # D2 계약 (L1)
 
 
 @respx.mock
 def test_rewrite_retry_then_ok(client):
     route = respx.post(f"{OLLAMA}/api/chat")
     route.side_effect = [chat_json(BAD), chat_json(GOOD)]
-    response = client.post("/rewrite", json={"query": "q"})
+    response = client.post("/rewrite", json=rewrite_body())
     assert response.status_code == 200
     assert route.call_count == 2          # 재시도 정확히 1회
 
@@ -44,33 +51,66 @@ def test_rewrite_retry_then_ok(client):
 def test_rewrite_retry_exhausted_422(client):
     route = respx.post(f"{OLLAMA}/api/chat")
     route.side_effect = [chat_json(BAD), chat_json(BAD)]
-    response = client.post("/rewrite", json={"query": "q"})
+    response = client.post("/rewrite", json=rewrite_body())
     assert response.status_code == 422
     assert response.json()["error"] == "schema_violation"
     assert route.call_count == 2          # 1회 초과 재시도 금지
 
 
 @respx.mock
-def test_rewrite_upstream_down_502(client):
+def test_rewrite_upstream_down_503(client):
     respx.post(f"{OLLAMA}/api/chat").mock(side_effect=httpx.ConnectError("down"))
-    response = client.post("/rewrite", json={"query": "q"})
-    assert response.status_code == 502
+    response = client.post("/rewrite", json=rewrite_body())
+    assert response.status_code == 503                       # 폴백 트리거 통일 (L9)
+    assert response.json()["error"] == "upstream"
+
+
+@respx.mock
+def test_rewrite_malformed_upstream_json_503(client):
+    respx.post(f"{OLLAMA}/api/chat").mock(
+        return_value=httpx.Response(200, content=b"<html>proxy error</html>"))
+    response = client.post("/rewrite", json=rewrite_body())
+    assert response.status_code == 503                       # 500 누출 금지 (L4)
+    assert response.json()["error"] == "upstream"
+
+
+@respx.mock
+def test_rewrite_total_budget_timeout_503(client):
+    async def slow_response(request):
+        await asyncio.sleep(0.5)
+        return chat_json(GOOD)
+
+    respx.post(f"{OLLAMA}/api/chat").mock(side_effect=slow_response)
+    original_timeout = client.app.state.rewrite_timeout
+    client.app.state.rewrite_timeout = 0.2                   # 총예산 0.2s < 응답 0.5s
+    try:
+        response = client.post("/rewrite", json=rewrite_body())
+        assert response.status_code == 503                   # 요청 단위 총예산 (L2)
+        assert response.json()["error"] == "upstream_timeout"
+    finally:
+        client.app.state.rewrite_timeout = original_timeout
 
 
 def test_busy_503_when_saturated(client):
     # 세마포어 2개를 선점해 포화 상태를 만든 뒤, 대기 없이 즉시 503인지 확인
-    import asyncio
-    sem = client.app.state.sem
+    semaphore = client.app.state.sem
     loop = asyncio.new_event_loop()
-    holds = [loop.run_until_complete(sem.acquire()) for _ in range(2)]
+    holds = [loop.run_until_complete(semaphore.acquire()) for _ in range(2)]
     try:
-        response = client.post("/rewrite", json={"query": "q"})
+        response = client.post("/rewrite", json=rewrite_body())
         assert response.status_code == 503
         assert response.headers["Retry-After"] == "2"
     finally:
         for _ in holds:
-            sem.release()
+            semaphore.release()
         loop.close()
+
+
+def test_rewrite_input_validation_422(client):
+    assert client.post("/rewrite", json=rewrite_body("x" * 301)).status_code == 422  # 길이 상한 (L8)
+    assert client.post(
+        "/rewrite", json={"query": "q", "topics": ["cs"]}
+    ).status_code == 422   # 계약 밖 필드 거부 (감사: extra=forbid)
 
 
 @respx.mock
@@ -82,11 +122,23 @@ def test_health_ok(client):
 
 
 @respx.mock
-def test_health_model_missing(client):
+def test_health_model_missing_503(client):
     respx.get(f"{OLLAMA}/api/tags").mock(
         return_value=httpx.Response(200, json={"models": [{"name": "llama3:8b"}]}))
-    assert client.get("/health").json()["status"] == "model_missing"
+    response = client.get("/health")
+    assert response.status_code == 503                       # healthy 위장 금지 (L3)
+    assert response.json()["status"] == "model_missing"
 
 
-def test_digest_501(client):
-    assert client.post("/digest").status_code == 501
+@respx.mock
+def test_health_invalid_upstream_503(client):
+    respx.get(f"{OLLAMA}/api/tags").mock(
+        return_value=httpx.Response(200, content=b"not json"))
+    assert client.get("/health").status_code == 503          # 형식 이상도 503 (L4)
+
+
+def test_digest_contract_and_501(client):
+    valid = {"query": "q",
+             "chunks": [{"path": "cs/x/2-summary.md", "heading": "h", "content": "c"}]}
+    assert client.post("/digest", json=valid).status_code == 501       # 계약 예약 (L7)
+    assert client.post("/digest", json={"chunks": []}).status_code == 422  # 입력 계약 검증

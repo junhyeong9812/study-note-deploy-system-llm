@@ -18,16 +18,18 @@ backend ──HTTP──▶ wrapper :8000 (LAN 노출 유일)
 
 | 경로 | 역할 | 타임아웃 | 출력 스키마 |
 |---|---|---|---|
-| `POST /rewrite` | 검색어 → 구조화 질의. thinking 비활성(`/no_think`) | 5s | `{intent, keywords[], expanded[], filters{topic?, doc_kind?}}` |
+| `POST /rewrite` | 검색어 → 구조화 질의. thinking 비활성(`/no_think`) | **총예산** 5s (재시도 포함) | `{intent, keywords[], expanded[], filters{topic?, doc_kind?}}` |
 | `POST /digest` | 검색 청크들 → 한국어 다이제스트 (2차 범위 — 계약만 예약) | 30s | `{summary, source_paths[]}` |
 | `GET /health` | ollama `/api/tags` 도달 + 모델 존재 확인 | 2s | `{status, model}` |
 
-- 입력: `/rewrite {query}` · `/digest {query, chunks:[{path, heading, content}]}` — 프롬프트 조립은 전부 wrapper(`prompts.py`).
+- 입력: `/rewrite {query}`(≤300자, 계약 밖 필드 거부) · `/digest {query, chunks:[{path, heading, content}]}` — 프롬프트 조립은 전부 wrapper(`domain/prompt.py`).
+- **오류 계약(폴백 트리거 통일)**: `503`(busy | upstream | upstream_timeout — 본문 `error` 필드로 구분) · `422`(schema_violation·입력 검증). 그 외 상태코드는 계약 위반. `/health`는 정상만 200, 모델 부재·업스트림 이상은 503(healthy 위장 금지).
 
 ## D3. 동시성 — 세마포어 + 즉시 거절 (대기 큐 없음)
 
 - `asyncio.Semaphore(2)` — 획득 실패(논블로킹) 시 **즉시 `503 {"retry_after": n}`**.
-- 이유: 검색은 LLM 없이 성립한다(원문 그대로 BM25+kNN). backend는 503/타임아웃 수신 시 **rewrite 생략 폴백** — 사용자 검색이 LLM에 인질로 잡히지 않는 게 최우선 불변식.
+- 이유: 검색은 LLM 없이 성립한다(원문 그대로 BM25+kNN). backend는 503/422 수신 시 **rewrite 생략 폴백** — 사용자 검색이 LLM에 인질로 잡히지 않는 게 최우선 불변식. 타임아웃은 **요청 단위 총예산**(재시도가 예산을 늘리지 않는다).
+- 세마포어 2·타임아웃 5s는 계약 기본값 — env(`MAX_INFLIGHT`·`REWRITE_TIMEOUT_S`)는 `[구현 검증]` 실측 조정용 노브다(임의 해제 목적 아님).
 - 세마포어 2 > NUM_PARALLEL 1 인 이유: 1건 추론 중 1건이 Ollama 내부 큐에 걸치는 것까지만 허용(파이프라이닝), 그 이상은 거절.
 
 ## D4. JSON 검증 — 3단 방어
@@ -69,4 +71,4 @@ wrapper/
   validate.py   # 검증 정책 — pydantic 파싱, 오류 피드백 재시도 1회, 422 확정
   Dockerfile
 ```
-- 의존 방향: api → usecase → (domain, validate). domain은 아무것도 import하지 않는다.
+- 의존 방향: api → usecase → (domain, validate). domain은 **내부 계층을 import하지 않는다**(표준 라이브러리·pydantic은 허용).
