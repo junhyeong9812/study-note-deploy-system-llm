@@ -36,8 +36,9 @@ def test_rewrite_ok(client):
     response = client.post("/rewrite", json=rewrite_body("lsm tree가 뭐지"))
     assert response.status_code == 200
     body = response.json()
-    assert body["keywords"] == ["LSM-Tree"]
-    assert body["filters"] == {"topic": "cs", "doc_kind": "summary"}   # D2 계약 (L1)
+    assert body["success"] is True                                     # 봉투 (#7)
+    assert body["data"]["keywords"] == ["LSM-Tree"]
+    assert body["data"]["filters"] == {"topic": "cs", "doc_kind": "summary"}   # D2 계약 (L1)
 
 
 @respx.mock
@@ -55,7 +56,8 @@ def test_rewrite_retry_exhausted_422(client):
     route.side_effect = [chat_json(BAD), chat_json(BAD)]
     response = client.post("/rewrite", json=rewrite_body())
     assert response.status_code == 422
-    assert response.json()["error"] == "schema_violation"
+    body = response.json()
+    assert body["success"] is False and body["error"]["code"] == "schema_violation"
     assert route.call_count == 2          # 1회 초과 재시도 금지
 
 
@@ -64,7 +66,7 @@ def test_rewrite_upstream_down_503(client):
     respx.post(f"{OLLAMA}/api/chat").mock(side_effect=httpx.ConnectError("down"))
     response = client.post("/rewrite", json=rewrite_body())
     assert response.status_code == 503                       # 폴백 트리거 통일 (L9)
-    assert response.json()["error"] == "upstream"
+    assert response.json()["error"]["code"] == "upstream"
 
 
 @respx.mock
@@ -73,7 +75,7 @@ def test_rewrite_malformed_upstream_json_503(client):
         return_value=httpx.Response(200, content=b"<html>proxy error</html>"))
     response = client.post("/rewrite", json=rewrite_body())
     assert response.status_code == 503                       # 500 누출 금지 (L4)
-    assert response.json()["error"] == "upstream"
+    assert response.json()["error"]["code"] == "upstream"
 
 
 @respx.mock
@@ -88,7 +90,7 @@ def test_rewrite_total_budget_timeout_503(client):
     try:
         response = client.post("/rewrite", json=rewrite_body())
         assert response.status_code == 503                   # 요청 단위 총예산 (L2)
-        assert response.json()["error"] == "upstream_timeout"
+        assert response.json()["error"]["code"] == "upstream_timeout"
     finally:
         client.app.state.rewrite_timeout = original_timeout
 
@@ -102,6 +104,9 @@ def test_busy_503_when_saturated(client):
         response = client.post("/rewrite", json=rewrite_body())
         assert response.status_code == 503
         assert response.headers["Retry-After"] == "2"
+        body = response.json()
+        assert body["success"] is False
+        assert body["error"] == {"code": "busy", "retry_after": 2}   # 봉투 (#7)
     finally:
         for _ in holds:
             semaphore.release()
@@ -140,10 +145,19 @@ def test_health_invalid_upstream_503(client):
     assert client.get("/health").status_code == 503          # 형식 이상도 503 (L4)
 
 
+def test_validation_error_uses_envelope(client):
+    response = client.post("/rewrite", json={"query": "q"})          # request_id 누락
+    assert response.status_code == 422
+    body = response.json()
+    assert body["success"] is False and body["error"]["code"] == "invalid_request"
+
+
 def test_digest_contract_and_501(client):
     valid = {"request_id": "req-1", "query": "q",
              "chunks": [{"path": "cs/x/2-summary.md", "heading": "h", "content": "c"}]}
-    assert client.post("/digest", json=valid).status_code == 501       # 계약 예약 (L7)
+    digest_response = client.post("/digest", json=valid)
+    assert digest_response.status_code == 501                          # 계약 예약 (L7)
+    assert digest_response.json()["error"]["code"] == "not_implemented"
     assert client.post("/digest", json={"chunks": []}).status_code == 422  # 입력 계약 검증
 
 

@@ -23,7 +23,8 @@ backend ──HTTP──▶ wrapper :8000 (LAN 노출 유일)
 | `GET /health` | ollama `/api/tags` 도달 + 모델 존재 확인 | 2s | `{status, model}` |
 
 - 입력: `/rewrite {query}`(≤300자, 계약 밖 필드 거부) · `/digest {query, chunks:[{path, heading, content}]}` — 프롬프트 조립은 전부 wrapper(`domain/prompt.py`).
-- **오류 계약(`/rewrite` 폴백 트리거 통일)**: `503`(busy | upstream | upstream_timeout — 본문 `error` 필드로 구분) · `422`(schema_violation·입력 검증) — `/rewrite`는 이 두 status 외 오류 상태코드를 내지 않는다. `/digest`는 구현 전까지 `501`(예약 상태 — 구현 시 이 오류 계약으로 편입). `/health`는 정상만 200, 모델 부재·업스트림 이상은 503(healthy 위장 금지).
+- **응답 봉투(정규화 — #7)**: 업무 응답은 전부 `{"success": true, "data": {...}}` / `{"success": false, "error": {"code", "detail"?, "retry_after"?}}` — backend는 `success` 플래그 하나로 분기한다. `/health`는 docker healthcheck 계약이라 봉투 제외.
+- **오류 계약(`/rewrite` 폴백 트리거 통일)**: `503`(code = busy | upstream | upstream_timeout) · `422`(code = schema_violation | invalid_request) — `/rewrite`는 이 두 status 외 오류 상태코드를 내지 않는다. `/digest`는 구현 전까지 `501`(code = not_implemented — 구현 시 이 계약으로 편입). `/health`는 정상만 200, 모델 부재·업스트림 이상은 503(healthy 위장 금지).
 
 ## D3. 동시성 — 세마포어 + 즉시 거절 (대기 큐 없음)
 

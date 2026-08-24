@@ -6,7 +6,8 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.domain.prompt import DigestIn, RewriteResult
+from app.domain.envelope import SuccessEnvelope, fail, ok
+from app.domain.prompt import DigestIn
 from app.logger import log
 from app.usecase import rewrite
 from app.validate import SchemaViolation
@@ -21,7 +22,7 @@ class RewriteIn(BaseModel):
     query: str = Field(min_length=1, max_length=300)
 
 
-@router.post("/rewrite", response_model=RewriteResult)
+@router.post("/rewrite", response_model=SuccessEnvelope)
 async def post_rewrite(body: RewriteIn, request: Request):
     state = request.app.state
     started = time.monotonic()
@@ -36,21 +37,21 @@ async def post_rewrite(body: RewriteIn, request: Request):
             model=state.model, timeout=state.rewrite_timeout,
         )
         await log(body.request_id, f"rewrite ok {elapsed_ms()}ms")   # 성공도 기록 (규약)
-        return result
+        return ok(result.model_dump())
     except rewrite.Busy:
         await log(body.request_id, "rewrite rejected: busy", "warning")
-        return JSONResponse({"error": "busy", "retry_after": 2}, status_code=503,
+        return JSONResponse(fail("busy", retry_after=2), status_code=503,
                             headers={"Retry-After": "2"})
     except rewrite.Timeout:
         await log(body.request_id, f"rewrite timeout {elapsed_ms()}ms", "error")
-        return JSONResponse({"error": "upstream_timeout"}, status_code=503)
+        return JSONResponse(fail("upstream_timeout"), status_code=503)
     except rewrite.Upstream as upstream_error:
         await log(body.request_id, f"rewrite upstream error: {str(upstream_error)[:200]}", "error")
-        return JSONResponse({"error": "upstream", "detail": str(upstream_error)[:200]},
+        return JSONResponse(fail("upstream", detail=str(upstream_error)[:200]),
                             status_code=503)
     except SchemaViolation as violation:
         await log(body.request_id, f"rewrite schema violation: {violation.last_error}", "error")
-        return JSONResponse({"error": "schema_violation", "detail": violation.last_error},
+        return JSONResponse(fail("schema_violation", detail=violation.last_error),
                             status_code=422)
 
 
@@ -58,7 +59,7 @@ async def post_rewrite(body: RewriteIn, request: Request):
 async def post_digest(body: DigestIn):
     # 계약(DigestIn·DigestResult)만 예약, 구현은 2차 (design D5)
     await log(body.request_id, "digest not implemented", "warning")
-    return JSONResponse({"error": "not_implemented"}, status_code=501)
+    return JSONResponse(fail("not_implemented"), status_code=501)
 
 
 @router.get("/health")
