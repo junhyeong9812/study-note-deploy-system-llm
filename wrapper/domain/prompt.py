@@ -32,6 +32,7 @@ class DigestIn(BaseModel):
 
     model_config = ConfigDict(extra="forbid")   # 계약 밖 필드 거부
 
+    request_id: str = Field(min_length=1, max_length=64)   # backend가 발행 (로그 규약)
     query: str = Field(min_length=1, max_length=300)
     chunks: list[DigestChunk] = Field(max_length=20)
 

@@ -7,6 +7,7 @@ import asyncio
 import httpx
 
 from domain.prompt import RewriteResult, rewrite_messages
+from logger import log
 from validate import parse_with_retry
 
 
@@ -48,7 +49,7 @@ async def _chat(client: httpx.AsyncClient, model: str, messages: list[dict],
         raise Upstream(str(error)) from error
 
 
-async def run(query: str, *,
+async def run(request_id: str, query: str, *,
               client: httpx.AsyncClient, sem: asyncio.Semaphore,
               model: str, timeout: float) -> RewriteResult:
     if sem.locked():                      # 대기 없이 즉시 거절 (D3)
@@ -61,6 +62,7 @@ async def run(query: str, *,
                 raw_output = await _chat(client, model, messages, schema, timeout)
 
                 async def retry(feedback: str) -> str:
+                    await log(request_id, "rewrite retry: schema violation feedback", "warning")
                     return await _chat(
                         client, model,
                         messages + [{"role": "assistant", "content": raw_output},

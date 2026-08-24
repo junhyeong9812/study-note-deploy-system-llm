@@ -33,6 +33,11 @@ services:
       MODEL: ${MODEL:-qwen3:8b}
       MAX_INFLIGHT: ${MAX_INFLIGHT:-2}
       REWRITE_TIMEOUT_S: ${REWRITE_TIMEOUT_S:-5}
+      SERVER_NAME: llm-wrapper
+      # 로그 중앙 큐 (Redis Stream, backend 호스트에 기동 예정 — 포트 6379 예약).
+      # 비우면 서버 로그만 남긴다. 실제 주소는 배포 .env에서 지정(리포에 IP 금지).
+      LOG_REDIS_URL: ${LOG_REDIS_URL:-}
+      LOG_STREAM: ${LOG_STREAM:-logs}
     depends_on:
       ollama:
         condition: service_healthy
