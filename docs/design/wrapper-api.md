@@ -51,3 +51,22 @@ wrapper/
   prompts.py         # 역할별 프롬프트+스키마 (이 리포의 존재 이유)
   Dockerfile
 ```
+
+## D7. 런타임 — FastAPI (WebFlux 대비 결정)
+
+동시성이 설계상 2로 고정된 워크로드라 리액티브의 이점이 발동하지 않고, 래핑의 핵심 임무(JSON 스키마 검증)는 pydantic이 1급 — 모델 정의가 Ollama `format` 스키마로 그대로 재사용된다. 실패 모드 단순성(코루틴+표준 세마포어 vs Mono/Flux 에러 삼킴 함정)·자원(수십 MB vs JVM 수백 MB) 모두 FastAPI 우위. 스택 통일 필요성은 낮음 — 래핑은 격리 부품(Python=ML 인접 계층 경계와 일치).
+
+## D8. 코드 구조 (심플 레이어드)
+
+```
+wrapper/
+  app.py        # 프레임워크 구동 설정 — FastAPI 인스턴스·lifespan(세마포어·ollama http client)
+  api.py        # 라우터 — /rewrite /digest /health (HTTP 관심사만)
+  domain/
+    prompt.py   # 도메인 — 역할별 프롬프트 + 출력 pydantic 스키마 (이 리포의 존재 이유)
+  usecase/
+    rewrite.py  # 유즈케이스 — 세마포어 획득→ollama 호출→검증·재시도→응답 조립
+  validate.py   # 검증 정책 — pydantic 파싱, 오류 피드백 재시도 1회, 422 확정
+  Dockerfile
+```
+- 의존 방향: api → usecase → (domain, validate). domain은 아무것도 import하지 않는다.
