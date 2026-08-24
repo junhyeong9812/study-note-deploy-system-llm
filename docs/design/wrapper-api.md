@@ -72,3 +72,9 @@ wrapper/
   Dockerfile
 ```
 - 의존 방향: api → usecase → (domain, validate). domain은 **내부 계층을 import하지 않는다**(표준 라이브러리·pydantic은 허용).
+
+## D9. 로깅 (정본 = 프로젝트 루트 docs/logging.md)
+
+- 포맷 `requestId:server-name:message` — requestId는 **backend가 발행**, wrapper는 필수 입력으로 받아 기록만 한다(`/rewrite`·`/digest` 입력 계약에 `request_id` 포함).
+- 이중 기록: stdout(항상) + Redis Stream `XADD`(env `LOG_REDIS_URL` 설정 시 — 실패 무해: 0.3s 타임아웃·30s 백오프·예외 전량 흡수).
+- 성공도 기록한다 — `[구현 검증]` 이연 항목(세마포어·타임아웃·재시도율)의 실측 데이터가 이 로그다.

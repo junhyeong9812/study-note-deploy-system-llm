@@ -1,4 +1,5 @@
-"""거절·검증·재시도·업스트림 이상 경로 우선 (spec ⑤). ollama는 respx로 mock."""
+"""거절·검증·재시도·업스트림 이상 경로 우선 (spec ⑤). ollama는 respx로 mock.
+LOG_REDIS_URL 미설정 → 로그는 stdout만, 테스트에서 Redis 접근 없음."""
 import asyncio
 
 import httpx
@@ -7,6 +8,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from app import app
+from logger import format_line
 
 OLLAMA = "http://ollama:11434"
 GOOD = ('{"intent":"LSM 트리 검색","keywords":["LSM-Tree"],'
@@ -19,7 +21,7 @@ def chat_json(content: str):
 
 
 def rewrite_body(query: str = "q"):
-    return {"query": query}
+    return {"request_id": "req-1", "query": query}
 
 
 @pytest.fixture
@@ -108,8 +110,9 @@ def test_busy_503_when_saturated(client):
 
 def test_rewrite_input_validation_422(client):
     assert client.post("/rewrite", json=rewrite_body("x" * 301)).status_code == 422  # 길이 상한 (L8)
+    assert client.post("/rewrite", json={"query": "q"}).status_code == 422           # request_id 필수 (규약)
     assert client.post(
-        "/rewrite", json={"query": "q", "topics": ["cs"]}
+        "/rewrite", json={"request_id": "req-1", "query": "q", "topics": ["cs"]}
     ).status_code == 422   # 계약 밖 필드 거부 (감사: extra=forbid)
 
 
@@ -138,7 +141,12 @@ def test_health_invalid_upstream_503(client):
 
 
 def test_digest_contract_and_501(client):
-    valid = {"query": "q",
+    valid = {"request_id": "req-1", "query": "q",
              "chunks": [{"path": "cs/x/2-summary.md", "heading": "h", "content": "c"}]}
     assert client.post("/digest", json=valid).status_code == 501       # 계약 예약 (L7)
     assert client.post("/digest", json={"chunks": []}).status_code == 422  # 입력 계약 검증
+
+
+def test_log_format_rule():
+    # 규약: requestId:server-name:message (root docs/logging.md)
+    assert format_line("req-9", "rewrite ok") == "req-9:llm-wrapper:rewrite ok"
