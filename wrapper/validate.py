@@ -16,18 +16,18 @@ class SchemaViolation(Exception):
 
 async def parse_with_retry(
     schema: type[T],
-    raw: str,
+    raw_output: str,
     retry: Callable[[str], Awaitable[str]],
 ) -> T:
     """1차 파싱 실패 시 오류 내용을 피드백해 한 번만 재요청한다."""
     try:
-        return schema.model_validate_json(raw)
-    except ValidationError as first:
-        raw2 = await retry(
-            f"이전 출력이 스키마를 위반했다: {first.errors()[:3]}\n"
+        return schema.model_validate_json(raw_output)
+    except ValidationError as first_error:
+        retried_output = await retry(
+            f"이전 출력이 스키마를 위반했다: {first_error.errors()[:3]}\n"
             f"스키마에 맞는 JSON만 다시 출력하라."
         )
         try:
-            return schema.model_validate_json(raw2)
-        except ValidationError as second:
-            raise SchemaViolation(str(second.errors()[:3])) from second
+            return schema.model_validate_json(retried_output)
+        except ValidationError as second_error:
+            raise SchemaViolation(str(second_error.errors()[:3])) from second_error

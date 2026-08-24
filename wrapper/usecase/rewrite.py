@@ -18,7 +18,7 @@ class Upstream(Exception):
 async def _chat(client: httpx.AsyncClient, model: str, messages: list[dict],
                 schema: dict, timeout: float) -> str:
     try:
-        r = await client.post(
+        response = await client.post(
             "/api/chat",
             json={
                 "model": model,
@@ -29,8 +29,8 @@ async def _chat(client: httpx.AsyncClient, model: str, messages: list[dict],
             },
             timeout=timeout,
         )
-        r.raise_for_status()
-        return r.json()["message"]["content"]
+        response.raise_for_status()
+        return response.json()["message"]["content"]
     except (httpx.HTTPError, KeyError) as e:
         raise Upstream(str(e)) from e
 
@@ -41,16 +41,16 @@ async def run(query: str, topics: list[str] | None, *,
     if sem.locked():                      # 대기 없이 즉시 거절 (D3)
         raise Busy()
     async with sem:
-        msgs = rewrite_messages(query, topics or DEFAULT_TOPICS)
+        messages = rewrite_messages(query, topics or DEFAULT_TOPICS)
         schema = RewriteResult.model_json_schema()
-        raw = await _chat(client, model, msgs, schema, timeout)
+        raw_output = await _chat(client, model, messages, schema, timeout)
 
         async def retry(feedback: str) -> str:
             return await _chat(
                 client, model,
-                msgs + [{"role": "assistant", "content": raw},
-                        {"role": "user", "content": feedback}],
+                messages + [{"role": "assistant", "content": raw_output},
+                            {"role": "user", "content": feedback}],
                 schema, timeout,
             )
 
-        return await parse_with_retry(RewriteResult, raw, retry)  # 2·3단
+        return await parse_with_retry(RewriteResult, raw_output, retry)  # 2·3단

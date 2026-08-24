@@ -17,20 +17,23 @@ class RewriteIn(BaseModel):
 
 @router.post("/rewrite")
 async def post_rewrite(body: RewriteIn, request: Request):
-    s = request.app.state
+    state = request.app.state
     try:
         result = await rewrite.run(
             body.query, body.topics,
-            client=s.client, sem=s.sem, model=s.model, timeout=s.rewrite_timeout,
+            client=state.client, sem=state.sem,
+            model=state.model, timeout=state.rewrite_timeout,
         )
         return result.model_dump()
     except rewrite.Busy:
         return JSONResponse({"error": "busy", "retry_after": 2}, status_code=503,
                             headers={"Retry-After": "2"})
-    except rewrite.Upstream as e:
-        return JSONResponse({"error": "upstream", "detail": str(e)[:200]}, status_code=502)
-    except SchemaViolation as e:
-        return JSONResponse({"error": "schema_violation", "detail": e.last_error}, status_code=422)
+    except rewrite.Upstream as upstream_error:
+        return JSONResponse({"error": "upstream", "detail": str(upstream_error)[:200]},
+                            status_code=502)
+    except SchemaViolation as violation:
+        return JSONResponse({"error": "schema_violation", "detail": violation.last_error},
+                            status_code=422)
 
 
 @router.post("/digest")
@@ -41,12 +44,16 @@ async def post_digest():
 
 @router.get("/health")
 async def health(request: Request):
-    s = request.app.state
+    state = request.app.state
     try:
-        r = await s.client.get("/api/tags", timeout=2)
-        r.raise_for_status()
-        models = [m["name"] for m in r.json().get("models", [])]
-        ok = any(m == s.model or m.startswith(s.model + ":") for m in models)
-        return {"status": "ok" if ok else "model_missing", "model": s.model}
+        response = await state.client.get("/api/tags", timeout=2)
+        response.raise_for_status()
+        model_names = [model["name"] for model in response.json().get("models", [])]
+        model_present = any(
+            name == state.model or name.startswith(state.model + ":")
+            for name in model_names
+        )
+        return {"status": "ok" if model_present else "model_missing", "model": state.model}
     except httpx.HTTPError:
-        return JSONResponse({"status": "ollama_unreachable", "model": s.model}, status_code=503)
+        return JSONResponse({"status": "ollama_unreachable", "model": state.model},
+                            status_code=503)

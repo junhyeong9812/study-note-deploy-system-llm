@@ -26,17 +26,17 @@ def client():
 @respx.mock
 def test_rewrite_ok(client):
     respx.post(f"{OLLAMA}/api/chat").mock(return_value=chat_json(GOOD))
-    r = client.post("/rewrite", json={"query": "lsm tree가 뭐지"})
-    assert r.status_code == 200
-    assert r.json()["keywords"] == ["LSM-Tree"]
+    response = client.post("/rewrite", json={"query": "lsm tree가 뭐지"})
+    assert response.status_code == 200
+    assert response.json()["keywords"] == ["LSM-Tree"]
 
 
 @respx.mock
 def test_rewrite_retry_then_ok(client):
     route = respx.post(f"{OLLAMA}/api/chat")
     route.side_effect = [chat_json(BAD), chat_json(GOOD)]
-    r = client.post("/rewrite", json={"query": "q"})
-    assert r.status_code == 200
+    response = client.post("/rewrite", json={"query": "q"})
+    assert response.status_code == 200
     assert route.call_count == 2          # 재시도 정확히 1회
 
 
@@ -44,17 +44,17 @@ def test_rewrite_retry_then_ok(client):
 def test_rewrite_retry_exhausted_422(client):
     route = respx.post(f"{OLLAMA}/api/chat")
     route.side_effect = [chat_json(BAD), chat_json(BAD)]
-    r = client.post("/rewrite", json={"query": "q"})
-    assert r.status_code == 422
-    assert r.json()["error"] == "schema_violation"
+    response = client.post("/rewrite", json={"query": "q"})
+    assert response.status_code == 422
+    assert response.json()["error"] == "schema_violation"
     assert route.call_count == 2          # 1회 초과 재시도 금지
 
 
 @respx.mock
 def test_rewrite_upstream_down_502(client):
     respx.post(f"{OLLAMA}/api/chat").mock(side_effect=httpx.ConnectError("down"))
-    r = client.post("/rewrite", json={"query": "q"})
-    assert r.status_code == 502
+    response = client.post("/rewrite", json={"query": "q"})
+    assert response.status_code == 502
 
 
 def test_busy_503_when_saturated(client):
@@ -64,9 +64,9 @@ def test_busy_503_when_saturated(client):
     loop = asyncio.new_event_loop()
     holds = [loop.run_until_complete(sem.acquire()) for _ in range(2)]
     try:
-        r = client.post("/rewrite", json={"query": "q"})
-        assert r.status_code == 503
-        assert r.headers["Retry-After"] == "2"
+        response = client.post("/rewrite", json={"query": "q"})
+        assert response.status_code == 503
+        assert response.headers["Retry-After"] == "2"
     finally:
         for _ in holds:
             sem.release()
@@ -77,8 +77,8 @@ def test_busy_503_when_saturated(client):
 def test_health_ok(client):
     respx.get(f"{OLLAMA}/api/tags").mock(
         return_value=httpx.Response(200, json={"models": [{"name": "qwen3:8b"}]}))
-    r = client.get("/health")
-    assert r.status_code == 200 and r.json()["status"] == "ok"
+    response = client.get("/health")
+    assert response.status_code == 200 and response.json()["status"] == "ok"
 
 
 @respx.mock
