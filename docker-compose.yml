@@ -1,0 +1,47 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: llm-ollama
+    # 호스트 비노출 — wrapper만 내부 네트워크로 접근 (design D1)
+    expose:
+      - "11434"
+    env_file: ollama/.env
+    volumes:
+      - ollama-models:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      # localhost 금지 — 컨테이너 안에서 ::1로 풀려 IPv4 바인딩 서버가 unhealthy로 찍힘
+      test: ["CMD", "ollama", "ls"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  wrapper:
+    build: ./wrapper
+    container_name: llm-wrapper
+    ports:
+      - "8000:8000"
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      MODEL: ${MODEL:-qwen3:8b}
+      MAX_INFLIGHT: ${MAX_INFLIGHT:-2}
+      REWRITE_TIMEOUT_S: ${REWRITE_TIMEOUT_S:-5}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -m 5 http://127.0.0.1:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
