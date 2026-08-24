@@ -1,3 +1,3 @@
-# qwen-server
+# study-note-deploy-system-llm
 
-deploy-study-note qwen-server — Ollama qwen3 래핑 API (.164)
+Ollama qwen3 래핑 API — 검색어 구조화·요약 (.164)
