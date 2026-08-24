@@ -21,28 +21,6 @@ class RewriteResult(BaseModel):
     filters: FilterResult = Field(default_factory=FilterResult)
 
 
-class DigestChunk(BaseModel):
-    path: str
-    heading: str
-    content: str
-
-
-class DigestIn(BaseModel):
-    """/digest 입력 계약 — 2차 구현 예약. (design D2·D5)"""
-
-    model_config = ConfigDict(extra="forbid")   # 계약 밖 필드 거부
-
-    request_id: str = Field(min_length=1, max_length=64)   # backend가 발행 (로그 규약)
-    query: str = Field(min_length=1, max_length=300)
-    chunks: list[DigestChunk] = Field(max_length=20)
-
-
-class DigestResult(BaseModel):
-    """/digest 출력 계약 — 2차 구현 예약."""
-
-    summary: str
-    source_paths: list[str]
-
 
 KNOWN_TOPICS = [
     "algorithm", "api-design", "cs", "data-structure", "db-engine-lab",

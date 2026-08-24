@@ -19,12 +19,11 @@ backend ──HTTP──▶ wrapper :8000 (LAN 노출 유일)
 | 경로 | 역할 | 타임아웃 | 출력 스키마 |
 |---|---|---|---|
 | `POST /rewrite` | 검색어 → 구조화 질의. thinking 비활성(**API `think:false`** — 프롬프트 `/no_think` 소프트 스위치는 ollama 템플릿이 무시, 실측) + `num_predict` 상한(폭주 가드레일) | **총예산** 5s (재시도 포함) | `{intent, keywords[], expanded[], filters{topic?, doc_kind?}}` |
-| `POST /digest` | 검색 청크들 → 한국어 다이제스트 (2차 범위 — 계약만 예약) | 30s | `{summary, source_paths[]}` |
 | `GET /health` | ollama `/api/tags` 도달 + 모델 존재 확인 | 2s | `{status, model}` |
 
-- 입력: `/rewrite {query}`(≤300자, 계약 밖 필드 거부) · `/digest {query, chunks:[{path, heading, content}]}` — 프롬프트 조립은 전부 wrapper(`domain/prompt.py`).
+- 입력: `/rewrite {query}`(≤300자, 계약 밖 필드 거부) — 프롬프트 조립은 전부 wrapper(`domain/prompt.py`).
 - **응답 봉투(정규화 — #7)**: 업무 응답은 전부 `{"success": true, "data": {...}}` / `{"success": false, "error": {"code", "detail"?, "retry_after"?}}` — backend는 `success` 플래그 하나로 분기한다. `/health`는 docker healthcheck 계약이라 봉투 제외.
-- **오류 계약(`/rewrite` 폴백 트리거 통일)**: `503`(code = busy | upstream | upstream_timeout) · `422`(code = schema_violation | invalid_request) — `/rewrite`는 이 두 status 외 오류 상태코드를 내지 않는다. `/digest`는 구현 전까지 `501`(code = not_implemented — 구현 시 이 계약으로 편입). `/health`는 정상만 200, 모델 부재·업스트림 이상은 503(healthy 위장 금지).
+- **오류 계약(`/rewrite` 폴백 트리거 통일)**: `503`(code = busy | upstream | upstream_timeout) · `422`(code = schema_violation | invalid_request) — `/rewrite`는 이 두 status 외 오류 상태코드를 내지 않는다. `/health`는 정상만 200, 모델 부재·업스트림 이상은 503(healthy 위장 금지).
 
 ## D3. 동시성 — 세마포어 + 즉시 거절 (대기 큐 없음)
 
@@ -41,7 +40,8 @@ backend ──HTTP──▶ wrapper :8000 (LAN 노출 유일)
 
 ## D5. 비범위(1차)
 
-- 인증 없음(LAN 전용 — 외부 비노출이 전제. 엣지에 붙이는 순간 재설계), 스트리밍 없음, 대화 상태 없음, `/digest` 구현 보류(계약만).
+- 인증 없음(LAN 전용 — 외부 비노출이 전제. 엣지에 붙이는 순간 재설계), 스트리밍 없음, 대화 상태 없음.
+- ~~`/digest`(검색 결과 요약)~~ — **#10에서 제거**(2026-08-24). 사람용 검색은 링크가 기본(인출 학습 목적), MCP 소비자는 강한 모델이라 원문 직독이 낫다 — 수요가 생기면 그때 설계해 추가.
 - `[구현 검증]` 세마포어 값 2·타임아웃 5s/30s·재시도 1회는 실측 후 조정 → `implementation-verification.md`.
 
 ## D6. 리포 구조
@@ -68,7 +68,7 @@ wrapper/
   src/
     app/                # 코드 (패키지 — 절대 임포트 `from app...`)
       app.py            # 프레임워크 구동 설정 — FastAPI 인스턴스·lifespan(세마포어·ollama http client)
-      api.py            # 라우터 — /rewrite /digest /health (HTTP 관심사만)
+      api.py            # 라우터 — /rewrite /health (HTTP 관심사만)
       domain/prompt.py  # 도메인 — 역할별 프롬프트 + 입출력 pydantic 스키마 (이 리포의 존재 이유)
       usecase/rewrite.py# 유즈케이스 — 세마포어 획득→총예산→ollama 호출→검증·재시도
       validate.py       # 검증 정책 — pydantic 파싱, 오류 피드백 재시도 1회, 422 확정
@@ -81,6 +81,6 @@ wrapper/
 
 ## D9. 로깅 (정본 = 프로젝트 루트 docs/logging.md)
 
-- 포맷 `requestId:server-name:message` — requestId는 **backend가 발행**, wrapper는 필수 입력으로 받아 기록만 한다(`/rewrite`·`/digest` 입력 계약에 `request_id` 포함).
+- 포맷 `requestId:server-name:message` — requestId는 **backend가 발행**, wrapper는 필수 입력으로 받아 기록만 한다(`/rewrite` 입력 계약에 `request_id` 포함).
 - 이중 기록: stdout(항상) + Redis Stream `XADD`(env `LOG_REDIS_URL` 설정 시 — 실패 무해: 0.3s 타임아웃·30s 백오프·예외 전량 흡수).
 - 성공도 기록한다 — `[구현 검증]` 이연 항목(세마포어·타임아웃·재시도율)의 실측 데이터가 이 로그다.

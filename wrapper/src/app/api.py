@@ -7,7 +7,6 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.domain.envelope import SuccessEnvelope, fail, ok
-from app.domain.prompt import DigestIn
 from app.logger import log
 from app.usecase import rewrite
 from app.validate import SchemaViolation
@@ -54,12 +53,6 @@ async def post_rewrite(body: RewriteIn, request: Request):
         return JSONResponse(fail("schema_violation", detail=violation.last_error),
                             status_code=422)
 
-
-@router.post("/digest")
-async def post_digest(body: DigestIn):
-    # 계약(DigestIn·DigestResult)만 예약, 구현은 2차 (design D5)
-    await log(body.request_id, "digest not implemented", "warning")
-    return JSONResponse(fail("not_implemented"), status_code=501)
 
 
 @router.get("/health")

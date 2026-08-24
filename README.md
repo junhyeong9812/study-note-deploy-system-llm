@@ -24,7 +24,6 @@ backend ──HTTP──▶ wrapper :8000   (LAN에 노출되는 유일한 포�
 | 메서드·경로 | 역할 | 성공 | 실패(코드) |
 |---|---|---|---|
 | `POST /rewrite` | 사용자의 검색어를 **검색엔진이 잘 찾는 형태로 변환** — 핵심 키워드, 영↔한 대응어, 어느 주제/문서종류를 뒤질지. 답을 만들지 않는다 | 200 | 503 busy·upstream·upstream_timeout / 422 schema_violation·invalid_request |
-| `POST /digest` | 검색으로 찾은 문서 조각들을 읽고 한국어로 요약 — **입출력 계약만 예약**(2차 구현) | (501) | 501 not_implemented |
 | `GET /health` | Ollama 도달 + 모델 존재 확인. 봉투 없음(docker healthcheck 계약) | 200 | 503 |
 
 ```jsonc
