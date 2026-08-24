@@ -9,8 +9,8 @@ from pydantic import BaseModel
 
 
 class ErrorBody(BaseModel):
-    code: str                      # busy | upstream | upstream_timeout | schema_violation
-    detail: str | None = None      # | invalid_request | not_implemented
+    code: str                      # busy | upstream | upstream_timeout
+    detail: str | None = None      # | schema_violation | invalid_request
     retry_after: int | None = None
 
 

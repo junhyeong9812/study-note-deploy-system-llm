@@ -152,14 +152,6 @@ def test_validation_error_uses_envelope(client):
     assert body["success"] is False and body["error"]["code"] == "invalid_request"
 
 
-def test_digest_contract_and_501(client):
-    valid = {"request_id": "req-1", "query": "q",
-             "chunks": [{"path": "cs/x/2-summary.md", "heading": "h", "content": "c"}]}
-    digest_response = client.post("/digest", json=valid)
-    assert digest_response.status_code == 501                          # 계약 예약 (L7)
-    assert digest_response.json()["error"]["code"] == "not_implemented"
-    assert client.post("/digest", json={"chunks": []}).status_code == 422  # 입력 계약 검증
-
 
 def test_log_format_rule():
     # 규약: requestId:server-name:message (root docs/logging.md)
