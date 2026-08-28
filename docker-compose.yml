@@ -24,7 +24,8 @@ services:
     restart: unless-stopped
 
   wrapper:
-    build: ./wrapper
+    image: ghcr.io/junhyeong9812/study-note-deploy-system-llm:${TAG:-latest}   # 배포는 ghcr pull(ci-cd)
+    build: ./wrapper                                                            # 로컬 개발용 빌드 병행
     container_name: llm-wrapper
     ports:
       - "8000:8000"
