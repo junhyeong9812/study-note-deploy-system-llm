@@ -1,27 +1,15 @@
-name: build-and-deploy
+name: deploy
 on:
   push:
     branches: [main]
 jobs:
-  build-push-deploy:
+  trigger:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
-      - uses: actions/checkout@v4
-      - name: login ghcr
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-      - name: build and push
-        run: |
-          IMAGE=ghcr.io/${{ github.repository }}
-          docker build -t $IMAGE:${{ github.sha }} -t $IMAGE:latest ./wrapper
-          docker push $IMAGE:${{ github.sha }}
-          docker push $IMAGE:latest
-      - name: trigger deploy
+      - name: trigger deploy (빌드는 대상 호스트에서 — git pull 방식)
         run: |
           curl -sS -X POST "https://www.junproject.xyz/api/deploy" \
             -H "X-Deploy-Secret: ${{ secrets.DEPLOY_SECRET }}" \
             -H "Content-Type: application/json" \
-            -d "{\"service\": \"llm\", \"image_tag\": \"${{ github.sha }}\", \"request_id\": \"gh-${GITHUB_RUN_ID}\"}" \
+            -d "{\"service\": \"llm\", \"commit_sha\": \"${{ github.sha }}\", \"request_id\": \"gh-${GITHUB_RUN_ID}\"}" \
             -w "\nhttp:%{http_code}\n"
