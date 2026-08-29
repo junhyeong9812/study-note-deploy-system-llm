@@ -24,9 +24,7 @@ services:
     restart: unless-stopped
 
   wrapper:
-    # 배포 정본 = ghcr. build:를 함께 두면 compose pull이 이 서비스를 건너뛴다(실측: "Skipped - No image to be pulled")
-    # 로컬 개발 빌드: docker build -t ghcr.io/junhyeong9812/study-note-deploy-system-llm:latest ./wrapper
-    image: ghcr.io/junhyeong9812/study-note-deploy-system-llm:${TAG:-latest}
+    build: ./wrapper       # 배포 = git pull + 호스트 재빌드 (ci-cd 에이전트가 up -d --build)
     container_name: llm-wrapper
     ports:
       - "8000:8000"
