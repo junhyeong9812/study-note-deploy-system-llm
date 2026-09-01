@@ -153,6 +153,28 @@ def test_validation_error_uses_envelope(client):
 
 
 
+def test_chat_busy_503_before_stream(client):
+    import asyncio as aio
+    semaphore = client.app.state.sem
+    loop = aio.new_event_loop()
+    holds = [loop.run_until_complete(semaphore.acquire()) for _ in range(2)]
+    try:
+        response = client.post("/chat", json={
+            "request_id": "req-1", "messages": [{"role": "user", "content": "hi"}]})
+        assert response.status_code == 503
+        assert response.json()["error"]["code"] == "busy"
+    finally:
+        for _ in holds:
+            semaphore.release()
+        loop.close()
+
+
+def test_chat_input_validation(client):
+    assert client.post("/chat", json={"request_id": "r", "messages": []}).status_code == 422
+    assert client.post("/chat", json={"request_id": "r",
+        "messages": [{"role": "tool", "content": "x"}]}).status_code == 422   # role 제한
+
+
 def test_log_format_rule():
     # 규약: requestId:server-name:message (root docs/logging.md)
     assert format_line("req-9", "rewrite ok") == "req-9:llm-wrapper:rewrite ok"
