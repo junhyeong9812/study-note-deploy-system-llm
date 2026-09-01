@@ -6,9 +6,11 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from fastapi.responses import StreamingResponse
+
 from app.domain.envelope import SuccessEnvelope, fail, ok
 from app.logger import log
-from app.usecase import rewrite
+from app.usecase import chat, rewrite
 from app.validate import SchemaViolation
 
 router = APIRouter()
@@ -53,6 +55,44 @@ async def post_rewrite(body: RewriteIn, request: Request):
         return JSONResponse(fail("schema_violation", detail=violation.last_error),
                             status_code=422)
 
+
+
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    role: str = Field(pattern="^(system|user|assistant)$")
+    content: str = Field(min_length=1, max_length=20_000)
+
+
+class ChatIn(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=64)
+    messages: list[ChatMessage] = Field(min_length=1, max_length=40)
+
+
+@router.post("/chat")
+async def post_chat(body: ChatIn, request: Request):
+    """채팅 스트리밍 — 성공 시 text/plain 청크(봉투 없음: 스트림이 계약).
+    스트림 시작 전 오류(포화·검증)는 봉투 JSON."""
+    state = request.app.state
+    if state.sem.locked():
+        await log(body.request_id, "chat rejected: busy", "warning")
+        return JSONResponse(fail("busy", retry_after=2), status_code=503,
+                            headers={"Retry-After": "2"})
+
+    async def token_stream():
+        count = 0
+        try:
+            async for token in chat.stream(
+                body.request_id, [m.model_dump() for m in body.messages],
+                client=state.client, sem=state.sem, model=state.model,
+            ):
+                count += 1
+                yield token
+            await log(body.request_id, f"chat ok tokens~{count}")
+        except Exception as error:                       # 스트림 도중 오류 — 로그만 (연결은 끊김)
+            await log(body.request_id, f"chat stream error: {type(error).__name__}", "error")
+
+    return StreamingResponse(token_stream(), media_type="text/plain; charset=utf-8")
 
 
 @router.get("/health")
