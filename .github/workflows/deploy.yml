@@ -8,7 +8,7 @@ jobs:
     steps:
       - name: trigger deploy (빌드는 대상 호스트에서 — git pull 방식)
         run: |
-          curl -sS -X POST "https://www.junproject.xyz/api/deploy" \
+          curl -sS --http1.1 -A "study-note-deploy/1.0" -X POST "https://www.junproject.xyz/api/deploy" \
             -H "X-Deploy-Secret: ${{ secrets.DEPLOY_SECRET }}" \
             -H "Content-Type: application/json" \
             -d "{\"service\": \"llm\", \"commit_sha\": \"${{ github.sha }}\", \"request_id\": \"gh-${GITHUB_RUN_ID}\"}" \
