@@ -24,7 +24,8 @@ services:
     restart: unless-stopped
 
   wrapper:
-    build: ./wrapper       # 배포 = git pull + 호스트 재빌드 (ci-cd 에이전트가 up -d --build)
+    build: ./wrapper
+    image: llm-wrapper:${IMAGE_TAG:-local}   # ci-cd: CI 가 커밋 태그로 빌드, CD 가 그 태그로 교체
     container_name: llm-wrapper
     ports:
       - "8000:8000"
