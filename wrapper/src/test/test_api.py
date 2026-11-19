@@ -1,6 +1,7 @@
 """거절·검증·재시도·업스트림 이상 경로 우선 (spec ⑤). ollama는 respx로 mock.
 LOG_REDIS_URL 미설정 → 로그는 stdout만, 테스트에서 Redis 접근 없음."""
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -167,6 +168,31 @@ def test_chat_busy_503_before_stream(client):
         for _ in holds:
             semaphore.release()
         loop.close()
+
+
+@respx.mock
+def test_chat_ndjson_events_when_accepted(client):
+    # Accept: application/x-ndjson 이면 이벤트 줄 형식 — 한 줄 = JSON 이벤트 하나
+    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(
+        200, content=b'{"message":{"content":"hi"}}\n{"done":true}\n'))
+    response = client.post("/chat", headers={"Accept": "application/x-ndjson"}, json={
+        "request_id": "req-1", "messages": [{"role": "user", "content": "hi"}]})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/x-ndjson")
+    assert response.headers["x-accel-buffering"] == "no"
+    lines = [json.loads(line) for line in response.text.splitlines()]
+    assert lines == [{"type": "start"}, {"type": "token", "text": "hi"}, {"type": "done"}]
+
+
+@respx.mock
+def test_chat_plain_text_kept_without_accept(client):
+    # 구 backend 호환 — Accept 없으면 기존 text 스트림 그대로
+    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(
+        200, content=b'{"message":{"content":"hi"}}\n{"done":true}\n'))
+    response = client.post("/chat", json={
+        "request_id": "req-1", "messages": [{"role": "user", "content": "hi"}]})
+    assert response.headers["content-type"].startswith("text/plain")
+    assert response.text == "hi"
 
 
 def test_chat_input_validation(client):

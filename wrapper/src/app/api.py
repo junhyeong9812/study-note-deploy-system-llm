@@ -1,5 +1,7 @@
 """라우터 — HTTP 관심사만. 도메인 오류를 계약된 상태코드(503·422)로 번역한다. (design D2·D3)"""
+import json
 import time
+from contextlib import aclosing
 
 import httpx
 from fastapi import APIRouter, Request
@@ -69,11 +71,43 @@ class ChatIn(BaseModel):
     messages: list[ChatMessage] = Field(min_length=1, max_length=40)
 
 
+NDJSON = "application/x-ndjson"
+
+
+async def chat_event_lines(body: ChatIn, state):
+    """이벤트 한 개 = JSON 한 줄. 대기·시작·오류를 로그로도 남긴다(대기 로그는 첫 순번만)."""
+    token_count = 0
+    queued_logged = False
+    # aclosing — backend 연결이 끊겨 이 제너레이터가 닫히면 대기 자리·생성 슬롯 반납도 즉시 실행된다
+    async with aclosing(chat.events(
+        body.request_id, [m.model_dump() for m in body.messages],
+        client=state.client, queue=state.chat_queue, model=state.model,
+    )) as chat_events:
+        async for event in chat_events:
+            kind = event["type"]
+            if kind == "queued" and not queued_logged:
+                queued_logged = True
+                await log(body.request_id, f"chat queued position={event['position']}")
+            elif kind == "token":
+                token_count += 1
+            elif kind == "error":
+                await log(body.request_id, f"chat error: {event['code']}",
+                          "error" if event["code"] == "upstream" else "warning")
+            elif kind == "done":
+                await log(body.request_id, f"chat ok tokens~{token_count}")
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+
+
 @router.post("/chat")
 async def post_chat(body: ChatIn, request: Request):
-    """채팅 스트리밍 — 성공 시 text/plain 청크(봉투 없음: 스트림이 계약).
-    스트림 시작 전 오류(포화·검증)는 봉투 JSON."""
+    """채팅 스트리밍 — 두 형식.
+    Accept: application/x-ndjson → 이벤트 줄(queued·start·token·error·done), 포화면 줄을 세운다.
+    그 외 → text/plain 청크(봉투 없음), 포화면 즉시 503 봉투(구 계약)."""
     state = request.app.state
+    if NDJSON in request.headers.get("accept", ""):
+        return StreamingResponse(
+            chat_event_lines(body, state), media_type=NDJSON,
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"})
     if state.sem.locked():
         await log(body.request_id, "chat rejected: busy", "warning")
         return JSONResponse(fail("busy", retry_after=2), status_code=503,
