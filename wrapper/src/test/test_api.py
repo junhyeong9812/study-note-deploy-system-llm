@@ -195,6 +195,83 @@ def test_chat_plain_text_kept_without_accept(client):
     assert response.text == "hi"
 
 
+class FakeRequest:
+    """is_disconnected()가 정해진 횟수 뒤부터 참 — 연결이 끊긴 상대를 흉내 낸다."""
+    def __init__(self, connected_polls: int):
+        self.remaining = connected_polls
+
+    async def is_disconnected(self) -> bool:
+        self.remaining -= 1
+        return self.remaining < 0
+
+
+def chat_in():
+    from app.api import ChatIn
+    return ChatIn(request_id="req-1", messages=[{"role": "user", "content": "hi"}])
+
+
+def make_state(queue):
+    from types import SimpleNamespace
+    return SimpleNamespace(client=httpx.AsyncClient(base_url=OLLAMA), chat_queue=queue, model="qwen3:8b")
+
+
+def test_chat_events_stop_and_free_place_when_peer_leaves_while_waiting(monkeypatch):
+    """대기 중 상대가 끊으면 다음 이벤트를 기다리지 않고 끝나고, 대기 자리가 빠진다."""
+    from app import api
+    from app.usecase.chat import ChatQueue
+    monkeypatch.setattr(api, "DISCONNECT_POLL_S", 0.01)
+
+    async def scenario():
+        queue = ChatQueue(asyncio.Semaphore(1), max_waiting=8, wait_timeout=60.0, heartbeat=10.0)
+        await queue.sem.acquire()                              # 포화 — 요청은 줄을 선다
+        state = make_state(queue)
+        lines = []
+        async def consume():
+            async for line in api.chat_event_lines(chat_in(), state, FakeRequest(connected_polls=3)):
+                lines.append(json.loads(line))
+        await asyncio.wait_for(consume(), timeout=2)           # heartbeat(10s)·대기 상한(60s) 전에 끝나야 한다
+        waiting_after_leave = queue.waiting_count
+        queue.sem.release()
+        await asyncio.sleep(0)
+        await state.client.aclose()
+        return lines, waiting_after_leave, queue
+
+    lines, waiting_after_leave, queue = asyncio.run(scenario())
+    assert lines == [{"type": "queued", "position": 1}]
+    assert waiting_after_leave == 0
+    assert not queue.sem.locked()                              # 떠난 요청이 슬롯을 가져가지 않았다
+
+
+@respx.mock
+def test_chat_events_stop_and_free_slot_when_peer_leaves_while_generating(monkeypatch):
+    """생성 중 상대가 끊으면 Ollama 응답을 끝까지 받지 않고 슬롯을 반납한다."""
+    from app import api
+    from app.usecase.chat import ChatQueue
+    monkeypatch.setattr(api, "DISCONNECT_POLL_S", 0.01)
+
+    async def slow_ollama():
+        yield b'{"message":{"content":"a"}}\n'
+        await asyncio.sleep(5)                                 # 다음 토큰이 한참 안 온다
+        yield b'{"message":{"content":"b"}}\n{"done":true}\n'
+
+    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(200, content=slow_ollama()))
+
+    async def scenario():
+        queue = ChatQueue(asyncio.Semaphore(1), max_waiting=8, wait_timeout=60.0, heartbeat=10.0)
+        state = make_state(queue)
+        lines = []
+        async def consume():
+            async for line in api.chat_event_lines(chat_in(), state, FakeRequest(connected_polls=5)):
+                lines.append(json.loads(line))
+        await asyncio.wait_for(consume(), timeout=2)
+        await state.client.aclose()
+        return lines, queue
+
+    lines, queue = asyncio.run(scenario())
+    assert lines == [{"type": "start"}, {"type": "token", "text": "a"}]
+    assert not queue.sem.locked()
+
+
 def test_chat_input_validation(client):
     assert client.post("/chat", json={"request_id": "r", "messages": []}).status_code == 422
     assert client.post("/chat", json={"request_id": "r",

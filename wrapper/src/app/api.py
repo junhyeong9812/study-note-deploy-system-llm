@@ -1,7 +1,8 @@
 """라우터 — HTTP 관심사만. 도메인 오류를 계약된 상태코드(503·422)로 번역한다. (design D2·D3)"""
+import asyncio
 import json
 import time
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 
 import httpx
 from fastapi import APIRouter, Request
@@ -74,28 +75,55 @@ class ChatIn(BaseModel):
 NDJSON = "application/x-ndjson"
 
 
-async def chat_event_lines(body: ChatIn, state):
-    """이벤트 한 개 = JSON 한 줄. 대기·시작·오류를 로그로도 남긴다(대기 로그는 첫 순번만)."""
+DISCONNECT_POLL_S = 0.5
+
+
+async def _client_disconnected(request: Request) -> None:
+    """상대가 연결을 끊을 때까지 기다린다.
+    uvicorn은 끊긴 연결에 쓰는 것을 조용히 무시하므로(쓰기 실패로는 알 수 없다) 직접 확인한다."""
+    while not await request.is_disconnected():
+        await asyncio.sleep(DISCONNECT_POLL_S)
+
+
+async def chat_event_lines(body: ChatIn, state, request: Request):
+    """이벤트 한 개 = JSON 한 줄. 대기·시작·오류를 로그로도 남긴다(대기 로그는 첫 순번만).
+    상대(backend)가 연결을 끊으면 즉시 멈춘다 — 떠난 질문이 대기 자리·생성 슬롯을 쓰지 않게."""
     token_count = 0
     queued_logged = False
-    # aclosing — backend 연결이 끊겨 이 제너레이터가 닫히면 대기 자리·생성 슬롯 반납도 즉시 실행된다
-    async with aclosing(chat.events(
-        body.request_id, [m.model_dump() for m in body.messages],
-        client=state.client, queue=state.chat_queue, model=state.model,
-    )) as chat_events:
-        async for event in chat_events:
-            kind = event["type"]
-            if kind == "queued" and not queued_logged:
-                queued_logged = True
-                await log(body.request_id, f"chat queued position={event['position']}")
-            elif kind == "token":
-                token_count += 1
-            elif kind == "error":
-                await log(body.request_id, f"chat error: {event['code']}",
-                          "error" if event["code"] == "upstream" else "warning")
-            elif kind == "done":
-                await log(body.request_id, f"chat ok tokens~{token_count}")
-            yield json.dumps(event, ensure_ascii=False) + "\n"
+    disconnected = asyncio.ensure_future(_client_disconnected(request))
+    try:
+        # aclosing — 이 제너레이터가 닫히면 대기 자리·생성 슬롯 반납도 즉시 실행된다
+        async with aclosing(chat.events(
+            body.request_id, [m.model_dump() for m in body.messages],
+            client=state.client, queue=state.chat_queue, model=state.model,
+        )) as chat_events:
+            while True:
+                next_event = asyncio.ensure_future(anext(chat_events))
+                await asyncio.wait({next_event, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+                if not next_event.done():
+                    next_event.cancel()          # 대기·생성 중이던 지점에 취소가 들어가 정리(finally)가 돈다
+                    with suppress(asyncio.CancelledError, StopAsyncIteration):
+                        await next_event
+                    await log(body.request_id, "chat client gone", "warning")
+                    return
+                try:
+                    event = next_event.result()
+                except StopAsyncIteration:
+                    return
+                kind = event["type"]
+                if kind == "queued" and not queued_logged:
+                    queued_logged = True
+                    await log(body.request_id, f"chat queued position={event['position']}")
+                elif kind == "token":
+                    token_count += 1
+                elif kind == "error":
+                    await log(body.request_id, f"chat error: {event['code']}",
+                              "error" if event["code"] == "upstream" else "warning")
+                elif kind == "done":
+                    await log(body.request_id, f"chat ok tokens~{token_count}")
+                yield json.dumps(event, ensure_ascii=False) + "\n"
+    finally:
+        disconnected.cancel()
 
 
 @router.post("/chat")
@@ -106,7 +134,7 @@ async def post_chat(body: ChatIn, request: Request):
     state = request.app.state
     if NDJSON in request.headers.get("accept", ""):
         return StreamingResponse(
-            chat_event_lines(body, state), media_type=NDJSON,
+            chat_event_lines(body, state, request), media_type=NDJSON,
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"})
     if state.sem.locked():
         await log(body.request_id, "chat rejected: busy", "warning")
