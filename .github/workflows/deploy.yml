@@ -25,14 +25,12 @@ jobs:
               -X POST "$DEPLOY_URL" -H "X-Deploy-Secret: $DEPLOY_SECRET" -H "Content-Type: application/json" \
               -d "$body" 2>curl-error.txt) || true
             echo "submit: http=${code:-000} $(head -c 300 response.json 2>/dev/null) $(head -c 200 curl-error.txt)"
-            if [ "$code" = "202" ]; then
+            if [ "${code:0:1}" = "2" ]; then
               exit 0
-            elif [ "$code" = "409" ] && grep -q deploy_in_progress response.json; then
+            elif [ "$code" = "409" ]; then
               busy=$((busy + 1))                  # 같은 서비스가 배포 중 — 끝나기를 기다린다 (최대 20분)
-              [ "$busy" -ge 40 ] && { echo "::error::앞선 배포가 20분 넘게 끝나지 않음"; exit 1; }
+              [ "$busy" -ge 40 ] && { echo "::error::409 가 20분 넘게 계속됨"; exit 1; }
               sleep 30
-            elif [ "$code" = "401" ] || [ "$code" = "409" ] || [ "$code" = "413" ] || [ "$code" = "422" ]; then
-              echo "::error::접수 거절 (http $code) — 재시도해도 같은 결과"; exit 1
             else
               transient=$((transient + 1))        # 엣지 504·연결 실패 등 — 홈 회선이 약 20초씩 끊기는 것을 넘긴다
               [ "$transient" -ge 5 ] && { echo "::error::접수 실패 5회 (마지막 http ${code:-000})"; exit 1; }
@@ -48,8 +46,8 @@ jobs:
               "$DEPLOY_URL/$REQUEST_ID" -H "X-Deploy-Secret: $DEPLOY_SECRET" 2>curl-error.txt) || true
             if [ "$code" = "200" ]; then
               missing=0
-              state=$(jq -r '.data.state // "unknown"' status.json)
-              echo "status: $state (ci $(jq -r '.data.ci_ms' status.json)ms, cd $(jq -r '.data.cd_ms' status.json)ms)"
+              state=$(jq -r '.data.state // "unknown"' status.json 2>/dev/null) || state=unreadable   # 본문이 깨져도 다음 조회로 넘긴다
+              echo "status: $state"
               if [ "$state" = "succeeded" ]; then
                 deployed=$(jq -r '.data.commit_sha' status.json)
                 [ "$deployed" = "$GITHUB_SHA" ] || { echo "::error::배포된 커밋이 다름: $deployed"; exit 1; }
