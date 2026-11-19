@@ -25,7 +25,7 @@ services:
 
   wrapper:
     build: ./wrapper
-    image: llm-wrapper:${IMAGE_TAG:-current}   # ci-cd: CI 가 커밋 태그로 빌드, CD 가 그 태그로 교체
+    image: llm-wrapper:${IMAGE_TAG:-local}   # ci-cd: CI 가 커밋 태그로 빌드, CD 가 그 태그로 교체
     container_name: llm-wrapper
     ports:
       - "8000:8000"
