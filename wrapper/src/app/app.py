@@ -10,17 +10,24 @@ from fastapi.responses import JSONResponse
 
 from app import api
 from app.domain.envelope import fail
+from app.usecase.chat import ChatQueue
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://ollama:11434")
 MODEL = os.environ.get("MODEL", "qwen3:8b")
 MAX_INFLIGHT = int(os.environ.get("MAX_INFLIGHT", "2"))
 REWRITE_TIMEOUT_S = float(os.environ.get("REWRITE_TIMEOUT_S", "5"))
+CHAT_MAX_WAITING = int(os.environ.get("CHAT_MAX_WAITING", "8"))
+CHAT_WAIT_TIMEOUT_S = float(os.environ.get("CHAT_WAIT_TIMEOUT_S", "60"))
+CHAT_QUEUE_HEARTBEAT_S = float(os.environ.get("CHAT_QUEUE_HEARTBEAT_S", "10"))
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     app.state.client = httpx.AsyncClient(base_url=OLLAMA_URL)
     app.state.sem = asyncio.Semaphore(MAX_INFLIGHT)
+    app.state.chat_queue = ChatQueue(app.state.sem, max_waiting=CHAT_MAX_WAITING,
+                                     wait_timeout=CHAT_WAIT_TIMEOUT_S,
+                                     heartbeat=CHAT_QUEUE_HEARTBEAT_S)
     app.state.model = MODEL
     app.state.rewrite_timeout = REWRITE_TIMEOUT_S
     yield

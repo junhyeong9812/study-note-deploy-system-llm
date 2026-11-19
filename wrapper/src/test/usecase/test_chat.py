@@ -1,0 +1,199 @@
+"""app/usecase/chat.py 미러 — 대기열 계약(순번·상한·시간 초과·이탈·반납)을 HTTP 계층 없이 검증."""
+import asyncio
+
+import httpx
+import respx
+
+from app.usecase import rewrite
+from app.usecase.chat import ChatQueue, events
+
+OLLAMA = "http://ollama:11434"
+STREAM_BODY = (b'{"message":{"content":"a"}}\n'
+               b'{"message":{"content":"b"}}\n'
+               b'{"message":{"content":""},"done":true}\n')
+MESSAGES = [{"role": "user", "content": "hi"}]
+
+
+def make_queue(slots=1, max_waiting=8, wait_timeout=60.0, heartbeat=10.0) -> ChatQueue:
+    return ChatQueue(asyncio.Semaphore(slots), max_waiting=max_waiting,
+                     wait_timeout=wait_timeout, heartbeat=heartbeat)
+
+
+def open_events(client, queue):
+    return events("req-1", MESSAGES, client=client, queue=queue, model="qwen3:8b")
+
+
+async def collect(generator) -> list[dict]:
+    return [event async for event in generator]
+
+
+@respx.mock
+def test_free_slot_streams_without_queueing():
+    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(200, content=STREAM_BODY))
+
+    async def scenario():
+        queue = make_queue()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            received = await collect(open_events(client, queue))
+        return received, queue
+
+    received, queue = asyncio.run(scenario())
+    assert received == [{"type": "start"}, {"type": "token", "text": "a"},
+                        {"type": "token", "text": "b"}, {"type": "done"}]
+    assert not queue.sem.locked() and queue.waiting_count == 0     # 반납 확인
+
+
+@respx.mock
+def test_saturated_queues_then_starts_in_arrival_order():
+    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(200, content=STREAM_BODY))
+
+    async def scenario():
+        queue = make_queue()
+        await queue.sem.acquire()                              # 포화
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            first, second = open_events(client, queue), open_events(client, queue)
+            first_event = await first.__anext__()
+            second_event = await second.__anext__()
+            queue.sem.release()                                # 앞 건 종료
+            first_rest = await collect(first)                  # 먼저 온 쪽이 먼저 시작·종료
+            second_rest = await collect(second)
+        return first_event, second_event, first_rest, second_rest, queue
+
+    first_event, second_event, first_rest, second_rest, queue = asyncio.run(scenario())
+    assert first_event == {"type": "queued", "position": 1}
+    assert second_event == {"type": "queued", "position": 2}
+    assert first_rest[0] == {"type": "start"} and first_rest[-1] == {"type": "done"}
+    assert {"type": "start"} in second_rest and second_rest[-1] == {"type": "done"}
+    assert not queue.sem.locked() and queue.waiting_count == 0
+
+
+def test_position_update_pushed_when_someone_ahead_leaves():
+    async def scenario():
+        queue = make_queue()
+        await queue.sem.acquire()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            first, second = open_events(client, queue), open_events(client, queue)
+            await first.__anext__()
+            await second.__anext__()                           # position 2
+            next_for_second = asyncio.ensure_future(second.__anext__())
+            await asyncio.sleep(0)                             # second가 대기에 들어가게
+            await first.aclose()                               # 앞사람 이탈
+            pushed = await asyncio.wait_for(next_for_second, timeout=1)   # heartbeat(10s) 전에 도착
+            await second.aclose()
+        return pushed
+
+    assert asyncio.run(scenario()) == {"type": "queued", "position": 1}
+
+
+def test_queue_full_rejected_immediately():
+    async def scenario():
+        queue = make_queue(max_waiting=1)
+        await queue.sem.acquire()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            waiter = open_events(client, queue)
+            await waiter.__anext__()                           # 대기 1명 = 상한
+            rejected = await collect(open_events(client, queue))
+            waiting_after_reject = queue.waiting_count
+            await waiter.aclose()
+        return rejected, waiting_after_reject
+
+    rejected, waiting_after_reject = asyncio.run(scenario())
+    assert rejected == [{"type": "error", "code": "queue_full"}]
+    assert waiting_after_reject == 1                           # 거절이 줄을 건드리지 않음
+
+
+def test_wait_timeout_ends_with_error_and_frees_place():
+    async def scenario():
+        queue = make_queue(wait_timeout=0.05, heartbeat=0.02)
+        await queue.sem.acquire()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            received = await collect(open_events(client, queue))
+        queue.sem.release()
+        return received, queue
+
+    received, queue = asyncio.run(scenario())
+    assert received[0] == {"type": "queued", "position": 1}
+    assert received[-1] == {"type": "error", "code": "queue_timeout"}
+    assert all(event["type"] == "queued" for event in received[:-1])
+    assert queue.waiting_count == 0 and not queue.sem.locked()  # 자리·세마포어 누수 없음
+
+
+def test_heartbeat_repeats_queued_while_position_unchanged():
+    async def scenario():
+        queue = make_queue(wait_timeout=0.2, heartbeat=0.02)
+        await queue.sem.acquire()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            return await collect(open_events(client, queue))
+
+    received = asyncio.run(scenario())
+    assert received.count({"type": "queued", "position": 1}) >= 3   # 무응답 구간 없음
+
+
+def test_leaving_while_waiting_frees_place_and_slot():
+    async def scenario():
+        queue = make_queue()
+        await queue.sem.acquire()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            waiter = open_events(client, queue)
+            await waiter.__anext__()
+            await waiter.aclose()                              # 대기 중 연결 끊김
+        waiting_after_leave = queue.waiting_count
+        queue.sem.release()
+        await asyncio.sleep(0)                                 # 취소된 대기자에게 넘어가지 않는지
+        return waiting_after_leave, queue
+
+    waiting_after_leave, queue = asyncio.run(scenario())
+    assert waiting_after_leave == 0
+    assert not queue.sem.locked()                              # 유령 대기자가 자리를 먹지 않음
+
+
+@respx.mock
+def test_upstream_failure_reported_as_event_and_slot_returned():
+    respx.post(f"{OLLAMA}/api/chat").mock(side_effect=httpx.ConnectError("down"))
+
+    async def scenario():
+        queue = make_queue()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            received = await collect(open_events(client, queue))
+        return received, queue
+
+    received, queue = asyncio.run(scenario())
+    assert received == [{"type": "start"}, {"type": "error", "code": "upstream"}]
+    assert not queue.sem.locked()
+
+
+@respx.mock
+def test_leaving_mid_stream_returns_slot():
+    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(200, content=STREAM_BODY))
+
+    async def scenario():
+        queue = make_queue()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            generator = open_events(client, queue)
+            await generator.__anext__()                        # start
+            await generator.__anext__()                        # 첫 토큰
+            await generator.aclose()                           # 생성 중 연결 끊김
+        return queue
+
+    queue = asyncio.run(scenario())
+    assert not queue.sem.locked()
+
+
+def test_rewrite_still_rejected_immediately_while_chat_waits():
+    """검색 재작성은 줄을 서지 않는다 — 채팅 대기자가 있어도 즉시 Busy(계약 무변경)."""
+    async def scenario():
+        queue = make_queue()
+        await queue.sem.acquire()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            waiter = open_events(client, queue)
+            await waiter.__anext__()
+            try:
+                await rewrite.run("req-2", "q", client=client, sem=queue.sem,
+                                  model="qwen3:8b", timeout=5.0)
+                return "ran"
+            except rewrite.Busy:
+                return "busy"
+            finally:
+                await waiter.aclose()
+
+    assert asyncio.run(scenario()) == "busy"
