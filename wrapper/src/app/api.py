@@ -97,31 +97,39 @@ async def chat_event_lines(body: ChatIn, state, request: Request):
             body.request_id, [m.model_dump() for m in body.messages],
             client=state.client, queue=state.chat_queue, model=state.model,
         )) as chat_events:
-            while True:
-                next_event = asyncio.ensure_future(anext(chat_events))
-                await asyncio.wait({next_event, disconnected}, return_when=asyncio.FIRST_COMPLETED)
-                if not next_event.done():
-                    next_event.cancel()          # 대기·생성 중이던 지점에 취소가 들어가 정리(finally)가 돈다
-                    with suppress(asyncio.CancelledError, StopAsyncIteration):
+            next_event = None
+            try:
+                while True:
+                    next_event = asyncio.ensure_future(anext(chat_events))
+                    await asyncio.wait({next_event, disconnected},
+                                       return_when=asyncio.FIRST_COMPLETED)
+                    if disconnected.done():      # 이벤트가 동시에 도착했어도 떠난 상대에겐 보내지 않는다
+                        await log(body.request_id, "chat client gone", "warning")
+                        return
+                    try:
+                        event = next_event.result()
+                    except StopAsyncIteration:
+                        return
+                    kind = event["type"]
+                    if kind == "queued" and not queued_logged:
+                        queued_logged = True
+                        await log(body.request_id, f"chat queued position={event['position']}")
+                    elif kind == "token":
+                        token_count += 1
+                    elif kind == "error":
+                        await log(body.request_id, f"chat error: {event['code']}",
+                                  "error" if event["code"] == "upstream" else "warning")
+                    elif kind == "done":
+                        await log(body.request_id, f"chat ok tokens~{token_count}")
+                    yield json.dumps(event, ensure_ascii=False) + "\n"
+            finally:
+                # 어떤 경로로 나가든(이탈·이 태스크의 취소·예외) 기다리던 이벤트 태스크를 먼저 끝낸다 —
+                # 살아 있는 채로 chat_events를 닫으면 닫기가 실패해 자리·슬롯 반납이 미뤄진다.
+                # 취소가 대기·생성 지점에 들어가 정리(finally)가 돈다.
+                if next_event is not None:
+                    next_event.cancel()
+                    with suppress(asyncio.CancelledError, StopAsyncIteration, Exception):
                         await next_event
-                    await log(body.request_id, "chat client gone", "warning")
-                    return
-                try:
-                    event = next_event.result()
-                except StopAsyncIteration:
-                    return
-                kind = event["type"]
-                if kind == "queued" and not queued_logged:
-                    queued_logged = True
-                    await log(body.request_id, f"chat queued position={event['position']}")
-                elif kind == "token":
-                    token_count += 1
-                elif kind == "error":
-                    await log(body.request_id, f"chat error: {event['code']}",
-                              "error" if event["code"] == "upstream" else "warning")
-                elif kind == "done":
-                    await log(body.request_id, f"chat ok tokens~{token_count}")
-                yield json.dumps(event, ensure_ascii=False) + "\n"
     finally:
         disconnected.cancel()
 
