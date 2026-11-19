@@ -10,7 +10,7 @@ backend는 이 서버의 HTTP API만 알면 되고, 모델 교체·프롬프트 
 backend ──HTTP──▶ wrapper :8000   (LAN에 노출되는 유일한 포트)
                     │  compose 내부 네트워크 (호스트 비노출)
                     ▼
-                  ollama :11434   (GPU · OLLAMA_NUM_PARALLEL=1 로 한 번에 1건 추론)
+                  ollama :11434   (GPU · OLLAMA_NUM_PARALLEL=2 로 동시 2건 추론)
 ```
 
 - Ollama 포트를 호스트에 열지 않는 이유: backend가 프롬프트를 우회해 직접 치는 경로를 막아
@@ -50,7 +50,10 @@ curl -s localhost:8000/health                  # {"status":"ok",...} 이면 준�
 | env | 기본 | 의미 |
 |---|---|---|
 | `MODEL` | qwen3:8b | 서빙 모델 (요청이 모델을 지정할 수 없다) |
-| `MAX_INFLIGHT` | 2 | 동시 처리 상한 — 초과는 대기 없이 503 |
+| `MAX_INFLIGHT` | 2 | 동시 처리 상한 — 초과 시 /rewrite 는 대기 없이 503, /chat(이벤트 형식)은 대기열 |
+| `CHAT_MAX_WAITING` | 8 | 채팅 대기열 길이 상한 — 초과는 `queue_full` |
+| `CHAT_WAIT_TIMEOUT_S` | 60 | 채팅 대기 시간 상한 — 초과는 `queue_timeout` |
+| `CHAT_QUEUE_HEARTBEAT_S` | 10 | 대기 중 `queued` 재전송 간격(프록시 무응답 타임아웃 방지) |
 | `REWRITE_TIMEOUT_S` | 5 | 요청 단위 총예산(재시도 포함) |
 | `LOG_REDIS_URL` | (비움) | 로그 중앙 큐. 비우면 stdout만 |
 

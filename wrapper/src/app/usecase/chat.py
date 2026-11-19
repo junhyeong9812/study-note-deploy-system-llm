@@ -143,6 +143,7 @@ async def events(request_id: str, messages: list[dict], *,
                 timeout=httpx.Timeout(connect=5, read=120, write=10, pool=5),
             ) as response:
                 response.raise_for_status()
+                completed = False
                 async for line in response.aiter_lines():
                     if not line:
                         continue
@@ -151,9 +152,14 @@ async def events(request_id: str, messages: list[dict], *,
                     if token:
                         yield {"type": "token", "text": token}
                     if data.get("done"):
+                        completed = True
                         break
         except (httpx.HTTPError, ValueError, AttributeError):
             # Ollama 도달 불가·비정상 응답 — 열린 스트림에서는 이벤트로 알린다
+            yield {"type": "error", "code": "upstream"}
+            return
+        if not completed:
+            # 완료 표시 없이 끊김 — 잘린 답을 정상 완료(done)로 위장하지 않는다
             yield {"type": "error", "code": "upstream"}
             return
         yield {"type": "done"}

@@ -32,6 +32,9 @@ services:
       OLLAMA_URL: http://ollama:11434
       MODEL: ${MODEL:-qwen3:8b}
       MAX_INFLIGHT: ${MAX_INFLIGHT:-2}
+      CHAT_MAX_WAITING: ${CHAT_MAX_WAITING:-8}
+      CHAT_WAIT_TIMEOUT_S: ${CHAT_WAIT_TIMEOUT_S:-60}
+      CHAT_QUEUE_HEARTBEAT_S: ${CHAT_QUEUE_HEARTBEAT_S:-10}
       REWRITE_TIMEOUT_S: ${REWRITE_TIMEOUT_S:-5}
       SERVER_NAME: llm-wrapper
       # 로그 중앙 큐 (Redis Stream, backend 호스트에 기동 예정 — 포트 6379 예약).

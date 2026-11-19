@@ -197,3 +197,21 @@ def test_rewrite_still_rejected_immediately_while_chat_waits():
                 await waiter.aclose()
 
     assert asyncio.run(scenario()) == "busy"
+
+
+@respx.mock
+def test_stream_cut_without_done_is_error_not_done():
+    """Ollama가 완료 표시 없이 끊기면 done이 아니라 오류 — 잘린 답이 정상 완료로 저장되지 않게."""
+    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(
+        200, content=b'{"message":{"content":"a"}}\n'))
+
+    async def scenario():
+        queue = make_queue()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            received = await collect(open_events(client, queue))
+        return received, queue
+
+    received, queue = asyncio.run(scenario())
+    assert received == [{"type": "start"}, {"type": "token", "text": "a"},
+                        {"type": "error", "code": "upstream"}]
+    assert not queue.sem.locked()

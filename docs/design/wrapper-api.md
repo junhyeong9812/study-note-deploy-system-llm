@@ -1,7 +1,7 @@
 # 의사결정 — Ollama 래핑 서버(FastAPI) 계약
 
 > 역할: qwen3:8b(Ollama)를 **역할 엔드포인트**로 감싸 프롬프트·스키마의 단일 출처가 된다.
-> 큐를 직접 만들지 않는다 — 직렬화는 Ollama(`OLLAMA_NUM_PARALLEL=1`, 내부 큐), 래핑은 **수문(backpressure)+계약 검증**만.
+> /rewrite 는 큐를 만들지 않는다 — 포화면 즉시 거절(**수문(backpressure)+계약 검증**). /chat 은 이벤트 형식(`Accept: application/x-ndjson`)일 때 래퍼가 대기열(최대 8·60s)을 소유한다. Ollama는 `OLLAMA_NUM_PARALLEL=2`로 래퍼 동시 2건과 일치.
 
 ## D1. 토폴로지
 
@@ -9,7 +9,7 @@
 backend ──HTTP──▶ wrapper :8000 (LAN 노출 유일)
                      │ compose 내부 네트워크 (호스트 비노출)
                      ▼
-                  ollama :11434  (GPU, OLLAMA_NUM_PARALLEL=1)
+                  ollama :11434  (GPU, OLLAMA_NUM_PARALLEL=2)
 ```
 - Ollama 포트는 호스트에 바인딩하지 않는다 — backend가 프롬프트를 우회해 직접 치는 경로 차단.
 - 모델은 env `MODEL`(기본 `qwen3:8b`)로 고정 — 요청이 모델을 지정할 수 없다.
@@ -30,7 +30,7 @@ backend ──HTTP──▶ wrapper :8000 (LAN 노출 유일)
 - `asyncio.Semaphore(2)` — 획득 실패(논블로킹) 시 **즉시 `503 {"retry_after": n}`**.
 - 이유: 검색은 LLM 없이 성립한다(원문 그대로 BM25+kNN). backend는 503/422 수신 시 **rewrite 생략 폴백** — 사용자 검색이 LLM에 인질로 잡히지 않는 게 최우선 불변식. 타임아웃은 **요청 단위 총예산**(재시도가 예산을 늘리지 않는다).
 - 세마포어 2·타임아웃 5s는 계약 기본값 — env(`MAX_INFLIGHT`·`REWRITE_TIMEOUT_S`)는 `[구현 검증]` 실측 조정용 노브다(임의 해제 목적 아님).
-- 세마포어 2 > NUM_PARALLEL 1 인 이유: 1건 추론 중 1건이 Ollama 내부 큐에 걸치는 것까지만 허용(파이프라이닝), 그 이상은 거절.
+- 세마포어 2 = NUM_PARALLEL 2 — 들여보낸 2건이 실제로 동시에 생성된다(8GB VRAM 실측 6.0GB·100% GPU). 그 이상은 /rewrite 거절, /chat 대기열.
 
 ## D4. JSON 검증 — 3단 방어
 
@@ -48,7 +48,7 @@ backend ──HTTP──▶ wrapper :8000 (LAN 노출 유일)
 
 ```
 docker-compose.yml   # ollama(GPU, expose only) + wrapper(:8000) + 양쪽 healthcheck·restart: unless-stopped
-ollama/              # env (OLLAMA_NUM_PARALLEL=1, KEEP_ALIVE 등), 모델 볼륨
+ollama/              # env (OLLAMA_NUM_PARALLEL=2, KEEP_ALIVE 등), 모델 볼륨
 wrapper/
   main.py            # 엔드포인트·세마포어·타임아웃
   prompts.py         # 역할별 프롬프트+스키마 (이 리포의 존재 이유)
