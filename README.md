@@ -7,7 +7,7 @@ backend는 이 서버의 HTTP API만 알면 되고, 모델 교체·프롬프트 
 ## 구조
 
 ```
-backend ──HTTP──▶ wrapper :8000   (LAN에 노출되는 유일한 포트)
+backend ──HTTP──▶ nginx :8000 ──▶ wrapper(blue 또는 green)   (LAN에 노출되는 유일한 포트는 nginx)
                     │  compose 내부 네트워크 (호스트 비노출)
                     ▼
                   ollama :11434   (GPU · OLLAMA_NUM_PARALLEL=2 로 동시 2건 추론)
@@ -42,7 +42,13 @@ backend ──HTTP──▶ wrapper :8000   (LAN에 노출되는 유일한 포�
 ## 실행
 
 ```bash
-docker compose up -d --build
+# 무중단 배포 구성: 래퍼는 두 자리(wrapper-blue·wrapper-green) 중 하나만 뜨고 nginx 가 그쪽으로 보낸다.
+# 이름 없이 `docker compose up -d` 를 하면 ollama 와 nginx 만 뜬다(자리는 이름을 지정해야 뜬다).
+# 처음 올릴 때: nginx 가 읽는 활성 디렉토리를 먼저 만든다(서버에만 있고 git 에 없다).
+mkdir -p deploy/active
+cp deploy/nginx/nginx.conf deploy/active/nginx.conf
+cp deploy/nginx/upstream-blue.conf deploy/active/upstream.conf
+docker compose up -d --build ollama wrapper-blue nginx
 docker exec llm-ollama ollama pull qwen3:8b   # 최초 1회 (5.2GB)
 curl -s localhost:8000/health                  # {"status":"ok",...} 이면 준비 완료
 ```
@@ -62,3 +68,13 @@ curl -s localhost:8000/health                  # {"status":"ok",...} 이면 준�
 - 테스트: `cd wrapper && pip install -r requirements-dev.txt && pytest` — `src/app` ↔ `src/test` 미러, 28건
 - 설계 결정: `docs/design/wrapper-api.md` (D1~D9) · 검증 이연 항목: `docs/design/implementation-verification.md`
 - 트러블슈팅: `docs/troubleshooting/qwen3-thinking-runaway.md` — thinking 폭주로 전 요청 타임아웃 났던 건
+
+## 무중단 배포와 대기열 인계
+
+배포는 ci-cd agent 가 한다: 비어 있는 자리에 새 버전을 띄워 헬스를 확인한 뒤 nginx 대상을 바꾼다. 절차·수동 조작은 ci-cd 저장소 README 의 "무중단 배포" 절을 따른다.
+
+- 전환 뒤 agent 가 구 버전에 `POST /admin/drain`(자리의 127.0.0.1 포트)을 보낸다. nginx 는 `/admin/` 을 밖으로 넘기지 않는다.
+- 정리를 시작한 래퍼는 **생성 중인 답은 끝까지** 내보내고, **아직 시작하지 않은 질문**에는 `{"type":"retry"}` 한 줄을 보낸 뒤 연결을 닫는다(대기자는 순번대로 0.2초 간격). 새 질문도 받지 않고 `retry` 로 돌려보낸다.
+- `retry` 를 받은 backend 는 같은 질문을 다시 보낸다(한 질문당 최대 2회). 새 버전이 받아 줄을 다시 세운다.
+- **배포 순서**: `retry` 를 이해하는 backend 가 먼저 나가 있어야 한다. 그렇지 않으면 구 backend 가 `retry` 를 모르는 줄로 버리고 대기 중이던 질문이 오류로 끝난다.
+- 정리는 되돌릴 수 없다. 정리를 시작한 래퍼를 손으로 다시 활성 자리로 돌리려면 그 컨테이너를 재기동한다.

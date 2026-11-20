@@ -281,3 +281,26 @@ def test_chat_input_validation(client):
 def test_log_format_rule():
     # 규약: requestId:server-name:message (root docs/logging.md)
     assert format_line("req-9", "rewrite ok") == "req-9:llm-wrapper:rewrite ok"
+
+
+def test_drain_endpoint_marks_queue_and_reports_waiting(client):
+    queue = client.app.state.chat_queue
+    assert queue.draining is False
+    response = client.post("/admin/drain")
+    assert response.status_code == 200
+    assert response.json() == {"success": True, "data": {"waiting": 0}}
+    assert queue.draining is True
+
+
+def test_chat_at_saturated_draining_server_gets_retry_event(client):
+    state = client.app.state
+
+    async def saturate():
+        for _ in range(state.sem._value):
+            await state.sem.acquire()
+    asyncio.run(saturate())
+    state.chat_queue.drain()
+    response = client.post("/chat", headers={"Accept": "application/x-ndjson"},
+                           json={"request_id": "req-1", "messages": [{"role": "user", "content": "hi"}]})
+    assert response.status_code == 200
+    assert [json.loads(line) for line in response.text.splitlines() if line] == [{"type": "retry"}]
