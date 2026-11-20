@@ -331,9 +331,12 @@ def test_waiter_that_gets_the_slot_during_spacing_is_sent_away_and_returns_it():
             queue.drain()
             await asyncio.sleep(0.05)                          # 대기자가 간격 대기(0.3초) 안에 들어갔다
             queue.sem.release()                                # 그사이 생성이 끝나 슬롯이 났다
-            return await asyncio.wait_for(rest_of(pending, waiter), HANDOFF_DEADLINE), queue
+            await asyncio.sleep(0.05)
+            took_slot = queue.sem.locked()                     # 대기자가 실제로 그 슬롯을 받았다(아직 간격 대기 중)
+            return await asyncio.wait_for(rest_of(pending, waiter), HANDOFF_DEADLINE), queue, took_slot
 
-    received, queue = asyncio.run(scenario())
+    received, queue, took_slot = asyncio.run(scenario())
+    assert took_slot, "테스트 전제: 간격 대기 중에 슬롯을 받아야 한다"
     assert received == [{"type": "retry"}]
     assert not queue.sem.locked() and queue.waiting_count == 0
 
@@ -378,3 +381,34 @@ def test_drain_releases_waiters_with_spacing():
     gaps = [later - earlier for earlier, later in zip(times, times[1:])]
     assert all(gap >= 0.08 for gap in gaps), f"대기자를 간격 없이 내보냈다: {times}"
     assert times[-1] < 1.0, f"간격(0.1초) 세 번이면 끝나야 한다: {times}"
+
+
+def test_waiters_keep_order_and_spacing_even_when_slots_free_up_during_drain():
+    """교체 중에 슬롯이 한꺼번에 나도, 자리를 받은 대기자가 순번·간격을 건너뛰어 먼저 나가지 않는다."""
+    async def scenario():
+        queue = make_draining_queue(slots=2, drain_spacing=0.1)
+        await queue.sem.acquire()
+        await queue.sem.acquire()                              # 생성 중인 두 건
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            generators = [open_events(client, queue) for _ in range(3)]
+            pendings = [await waiting_inside_queue(generator) for generator in generators]
+            started = asyncio.get_running_loop().time()
+            queue.drain()
+            queue.sem.release()
+            queue.sem.release()                                # 생성 중이던 두 건이 동시에 끝났다
+            finished = []
+
+            async def finish(index, pending, generator):
+                received = await rest_of(pending, generator)
+                finished.append((index, asyncio.get_running_loop().time() - started, received[-1]))
+
+            await asyncio.wait_for(asyncio.gather(*(finish(index, pending, generator)
+                for index, (pending, generator) in enumerate(zip(pendings, generators)))), HANDOFF_DEADLINE)
+        return finished, queue
+
+    finished, queue = asyncio.run(scenario())
+    assert [index for index, _, _ in finished] == [0, 1, 2], f"순번대로 나가지 않았다: {finished}"
+    assert all(last == {"type": "retry"} for _, _, last in finished), finished
+    times = [moment for _, moment, _ in finished]
+    assert all(later - earlier >= 0.08 for earlier, later in zip(times, times[1:])), f"간격 없이 나갔다: {times}"
+    assert not queue.sem.locked() and queue.sem._value == 2 and queue.waiting_count == 0   # 받았던 자리는 모두 반납

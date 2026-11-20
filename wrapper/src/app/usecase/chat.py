@@ -127,9 +127,12 @@ async def _wait_turn(queue: ChatQueue) -> AsyncIterator[dict]:
             finally:
                 position_changed.cancel()
             if acquire_task.done():
-                if queue.draining:          # 기다리는 사이 교체가 시작됐다 — 받은 자리를 쓰지 않고 넘긴다
-                    yield {"type": "retry"}
-                    return
+                if queue.draining:
+                    # 교체 중에 자리를 받았다 — 쓰지 않고 곧바로 반납한다. 나가는 것은 다른 대기자와 똑같이
+                    # 자기 순번이 맨 앞이 됐을 때 간격을 두고 한다(자리를 받았다고 먼저 나가면 순서가 뒤섞인다).
+                    queue.sem.release()
+                    acquire_task = asyncio.get_running_loop().create_future()   # 더는 자리를 기다리지 않는다
+                    continue
                 acquired = True
                 return
     finally:
