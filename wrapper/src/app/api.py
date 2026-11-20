@@ -121,6 +121,8 @@ async def chat_event_lines(body: ChatIn, state, request: Request):
                                   "error" if event["code"] == "upstream" else "warning")
                     elif kind == "done":
                         await log(body.request_id, f"chat ok tokens~{token_count}")
+                    elif kind == "retry":
+                        await log(body.request_id, "chat handed off: draining", "warning")
                     yield json.dumps(event, ensure_ascii=False) + "\n"
             finally:
                 # 어떤 경로로 나가든(이탈·이 태스크의 취소·예외) 기다리던 이벤트 태스크를 먼저 끝낸다 —
@@ -132,6 +134,15 @@ async def chat_event_lines(body: ChatIn, state, request: Request):
                         await next_event
     finally:
         disconnected.cancel()
+
+
+@router.post("/admin/drain")
+async def post_drain(request: Request):
+    """정리 시작(무중단 배포) — ci-cd agent 가 전환 뒤 구 버전의 로컬 포트로 부른다.
+    전환용 nginx 는 /admin/ 을 밖으로 넘기지 않는다."""
+    handed_off = request.app.state.chat_queue.drain()
+    await log("drain", f"drain started: handing off {handed_off} waiting", "warning")
+    return ok({"handed_off": handed_off})
 
 
 @router.post("/chat")
