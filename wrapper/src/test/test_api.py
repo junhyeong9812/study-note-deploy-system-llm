@@ -288,7 +288,7 @@ def test_drain_endpoint_marks_queue_and_reports_waiting(client):
     assert queue.draining is False
     response = client.post("/admin/drain")
     assert response.status_code == 200
-    assert response.json() == {"success": True, "data": {"handed_off": 0}}
+    assert response.json() == {"success": True, "data": {"waiting": 0}}
     assert queue.draining is True
 
 

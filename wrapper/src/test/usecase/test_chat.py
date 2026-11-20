@@ -218,48 +218,90 @@ def test_stream_cut_without_done_is_error_not_done():
 
 
 # ---- 정리(drain): 새 버전으로 교체 중 — 생성 중인 건은 끝까지, 대기자는 순번대로 내보낸다 ----
+# heartbeat 를 길게(60초) 두고 시나리오마다 시간 상한을 건다: drain 의 깨움이 아니라 heartbeat 덕에
+# 우연히 통과하는 일이 없게.
+
+HANDOFF_DEADLINE = 3.0
+
 
 def make_draining_queue(slots=1, drain_spacing=0.01) -> ChatQueue:
-    return ChatQueue(asyncio.Semaphore(slots), max_waiting=8, wait_timeout=60.0,
-                     heartbeat=10.0, drain_spacing=drain_spacing)
+    return ChatQueue(asyncio.Semaphore(slots), max_waiting=8, wait_timeout=120.0,
+                     heartbeat=60.0, drain_spacing=drain_spacing)
 
 
-def test_drain_hands_off_waiters_in_order_and_running_one_finishes():
+async def waiting_inside_queue(generator) -> asyncio.Future:
+    """첫 queued 를 받고, 다음 이벤트를 기다리는 상태(대기 지점 안)까지 들여보낸다."""
+    assert (await generator.__anext__())["type"] == "queued"
+    pending = asyncio.ensure_future(generator.__anext__())
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    return pending
+
+
+async def rest_of(pending: asyncio.Future, generator) -> list[dict]:
+    received = []
+    try:
+        received.append(await pending)
+        async for event in generator:
+            received.append(event)
+    except StopAsyncIteration:
+        pass
+    return received
+
+
+def test_drain_hands_off_waiters_in_order_while_they_wait():
     async def scenario():
         queue = make_draining_queue()
         await queue.sem.acquire()                              # 생성 중인 한 건이 슬롯을 쥐고 있다
         async with httpx.AsyncClient(base_url=OLLAMA) as client:
             first, second = open_events(client, queue), open_events(client, queue)
-            assert await first.__anext__() == {"type": "queued", "position": 1}
-            assert await second.__anext__() == {"type": "queued", "position": 2}
-            handed_off = queue.drain()
+            first_pending = await waiting_inside_queue(first)
+            second_pending = await waiting_inside_queue(second)
+            waiting = queue.drain()
             order = []
 
-            async def finish(name, generator):
-                received = await collect(generator)
+            async def finish(name, pending, generator):
+                received = await rest_of(pending, generator)
                 order.append(name)
                 return received
 
-            second_rest, first_rest = await asyncio.gather(finish("second", second), finish("first", first))
-        return handed_off, order, first_rest, second_rest, queue
+            second_rest, first_rest = await asyncio.wait_for(asyncio.gather(
+                finish("second", second_pending, second), finish("first", first_pending, first)), HANDOFF_DEADLINE)
+        return waiting, order, first_rest, second_rest, queue
 
-    handed_off, order, first_rest, second_rest, queue = asyncio.run(scenario())
-    assert handed_off == 2
+    waiting, order, first_rest, second_rest, queue = asyncio.run(scenario())
+    assert waiting == 2
     assert order == ["first", "second"]                        # 순번대로 내보낸다
     assert first_rest == [{"type": "retry"}]
-    assert second_rest[-1] == {"type": "retry"}                # 앞사람이 나가 순번이 당겨진 뒤 내보낸다
+    assert second_rest[-1] == {"type": "retry"}
     assert all(event["type"] in ("queued", "retry") for event in second_rest)
     assert queue.waiting_count == 0
-    assert queue.sem.locked()                                  # 생성 중인 건의 슬롯은 그대로(대기자가 가져가지 않았다)
+    assert queue.sem.locked()                                  # 생성 중인 건의 슬롯은 그대로
 
 
-def test_new_arrival_at_saturated_draining_queue_is_sent_away_at_once():
+def test_drain_is_noticed_even_when_waiter_was_between_events():
+    """대기자가 queued 를 막 내보내고(아직 기다리러 가기 전) 멈춰 있을 때 정리가 시작돼도 곧바로 나간다."""
+    async def scenario():
+        queue = make_draining_queue()
+        await queue.sem.acquire()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            waiter = open_events(client, queue)
+            assert await waiter.__anext__() == {"type": "queued", "position": 1}   # yield 에 멈춘 상태
+            queue.drain()
+            return await asyncio.wait_for(collect(waiter), HANDOFF_DEADLINE), queue
+
+    received, queue = asyncio.run(scenario())
+    assert received == [{"type": "retry"}]
+    assert queue.waiting_count == 0
+
+
+def test_new_arrival_at_draining_queue_is_sent_away_at_once():
     async def scenario():
         queue = make_draining_queue()
         await queue.sem.acquire()
         queue.drain()
         async with httpx.AsyncClient(base_url=OLLAMA) as client:
-            return await collect(open_events(client, queue)), queue
+            return await asyncio.wait_for(collect(open_events(client, queue)), HANDOFF_DEADLINE), queue
 
     received, queue = asyncio.run(scenario())
     assert received == [{"type": "retry"}]
@@ -278,20 +320,22 @@ def test_draining_queue_does_not_start_new_generation_even_with_a_free_slot():
     assert not queue.sem.locked() and queue.waiting_count == 0
 
 
-def test_waiter_that_got_the_slot_after_drain_is_sent_away_and_returns_the_slot():
+def test_waiter_that_gets_the_slot_during_spacing_is_sent_away_and_returns_it():
+    """맨 앞 대기자가 내보내기 간격을 기다리는 사이 슬롯이 났다 — 그래도 여기서 시작하지 않고, 받은 자리는 반납한다."""
     async def scenario():
-        queue = make_draining_queue(drain_spacing=0.05)
+        queue = make_draining_queue(drain_spacing=0.3)
         await queue.sem.acquire()
         async with httpx.AsyncClient(base_url=OLLAMA) as client:
             waiter = open_events(client, queue)
-            assert await waiter.__anext__() == {"type": "queued", "position": 1}
+            pending = await waiting_inside_queue(waiter)
             queue.drain()
-            queue.sem.release()                                # 내보내기 직전에 슬롯이 났다 — 그래도 여기서 시작하지 않는다
-            return await collect(waiter), queue
+            await asyncio.sleep(0.05)                          # 대기자가 간격 대기(0.3초) 안에 들어갔다
+            queue.sem.release()                                # 그사이 생성이 끝나 슬롯이 났다
+            return await asyncio.wait_for(rest_of(pending, waiter), HANDOFF_DEADLINE), queue
 
     received, queue = asyncio.run(scenario())
     assert received == [{"type": "retry"}]
-    assert not queue.sem.locked() and queue.waiting_count == 0  # 받았던 자리도 반납
+    assert not queue.sem.locked() and queue.waiting_count == 0
 
 
 @respx.mock
@@ -317,19 +361,20 @@ def test_drain_releases_waiters_with_spacing():
         await queue.sem.acquire()
         async with httpx.AsyncClient(base_url=OLLAMA) as client:
             generators = [open_events(client, queue) for _ in range(3)]
-            for generator in generators:
-                await generator.__anext__()
+            pendings = [await waiting_inside_queue(generator) for generator in generators]
             started = asyncio.get_running_loop().time()
             queue.drain()
             times = []
 
-            async def finish(generator):
-                await collect(generator)
+            async def finish(pending, generator):
+                await rest_of(pending, generator)
                 times.append(asyncio.get_running_loop().time() - started)
 
-            await asyncio.gather(*(finish(generator) for generator in generators))
+            await asyncio.wait_for(asyncio.gather(
+                *(finish(pending, generator) for pending, generator in zip(pendings, generators))), HANDOFF_DEADLINE)
         return times
 
     times = asyncio.run(scenario())
     gaps = [later - earlier for earlier, later in zip(times, times[1:])]
     assert all(gap >= 0.08 for gap in gaps), f"대기자를 간격 없이 내보냈다: {times}"
+    assert times[-1] < 1.0, f"간격(0.1초) 세 번이면 끝나야 한다: {times}"

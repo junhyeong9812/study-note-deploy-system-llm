@@ -140,9 +140,9 @@ async def chat_event_lines(body: ChatIn, state, request: Request):
 async def post_drain(request: Request):
     """정리 시작(무중단 배포) — ci-cd agent 가 전환 뒤 구 버전의 로컬 포트로 부른다.
     전환용 nginx 는 /admin/ 을 밖으로 넘기지 않는다."""
-    handed_off = request.app.state.chat_queue.drain()
-    await log("drain", f"drain started: handing off {handed_off} waiting", "warning")
-    return ok({"handed_off": handed_off})
+    waiting = request.app.state.chat_queue.drain()
+    await log("drain", f"drain started: {waiting} waiting will be sent to the new server", "warning")
+    return ok({"waiting": waiting})
 
 
 @router.post("/chat")

@@ -76,7 +76,7 @@ class ChatQueue:
 
     def drain(self) -> int:
         """정리 시작(무중단 배포) — 생성 중인 건은 끝까지 가고, 아직 시작하지 않은 대기자는
-        맨 앞부터 한 명씩 retry 로 내보낸다. 내보낼 대기자 수를 돌려준다."""
+        맨 앞부터 한 명씩 retry 로 내보낸다. 지금 줄에 서 있는 대기자 수를 돌려준다."""
         self.draining = True
         for ticket in self._tickets:        # 기다리던 사람들을 깨워 자기 차례를 확인하게 한다
             ticket.set()
@@ -109,6 +109,12 @@ async def _wait_turn(queue: ChatQueue) -> AsyncIterator[dict]:
                 return
             yield {"type": "queued", "position": queue._position(ticket)}
             ticket.clear()
+            if queue.draining:
+                # 위 yield 에 멈춰 있는 사이 정리가 시작됐을 수 있다 — 방금 clear 로 그 깨움을 지웠으니
+                # 기다리러 가지 않고 곧바로 다시 확인한다(안 그러면 heartbeat 만큼 늦게 알아챈다)
+                if queue._position(ticket) == 1:
+                    continue
+                # 앞사람이 나가면 _leave 가 다시 깨운다
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 yield {"type": "error", "code": "queue_timeout"}
