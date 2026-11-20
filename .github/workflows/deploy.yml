@@ -8,7 +8,7 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50   # 접수 대기 최대 20분 + 조회 최대 25분 + 여유
     env:
       SERVICE: llm
       DEPLOY_URL: https://www.junproject.xyz/api/deploy
@@ -40,7 +40,7 @@ jobs:
 
       - name: wait (배포가 끝날 때까지 조회 — succeeded 일 때만 초록불)
         run: |
-          deadline=$((SECONDS + 1200)); missing=0
+          deadline=$((SECONDS + 1500)); missing=0
           while [ "$SECONDS" -lt "$deadline" ]; do
             code=$(curl -sS --http1.1 -A "study-note-deploy/1.0" --max-time 20 -o status.json -w '%{http_code}' \
               "$DEPLOY_URL/$REQUEST_ID" -H "X-Deploy-Secret: $DEPLOY_SECRET" 2>curl-error.txt) || true
@@ -65,5 +65,5 @@ jobs:
             fi
             sleep 10
           done
-          echo "::error::20분 안에 끝나지 않음 — 마지막 상태: $(jq -r '.data.state // "unknown"' status.json 2>/dev/null)"
+          echo "::error::25분 안에 끝나지 않음 — 마지막 상태: $(jq -r '.data.state // "unknown"' status.json 2>/dev/null)"
           exit 1
