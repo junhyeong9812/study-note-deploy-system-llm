@@ -91,9 +91,6 @@ class ChatQueue:
 async def _wait_turn(queue: ChatQueue) -> AsyncIterator[dict]:
     """자리가 날 때까지 queued 이벤트를 흘린다. 정상 종료 = 세마포어 획득 완료.
     줄이 꽉 찼거나 시간이 다 되면 error 이벤트를, 서버가 교체 중이면 retry 이벤트를 내고 끝난다(세마포어 미획득)."""
-    if queue.draining:                      # 교체 중인 서버에는 새로 줄을 세우지 않는다
-        yield {"type": "retry"}
-        return
     if queue.waiting_count >= queue.max_waiting:
         yield {"type": "error", "code": "queue_full"}
         return
@@ -105,10 +102,9 @@ async def _wait_turn(queue: ChatQueue) -> AsyncIterator[dict]:
         while True:
             if queue.draining and queue._position(ticket) == 1:
                 # 맨 앞 사람부터 한 명씩 나간다 — 나가면 뒤 사람의 순번이 당겨져 그 사람 차례가 된다
+                # 그사이 자리를 받았더라도 여기서 생성을 시작하지 않는다 — 교체 중인 서버의 일을 늘리지 않는다
+                # (받은 자리는 아래 finally 가 반납한다)
                 await asyncio.sleep(queue.drain_spacing)
-                if acquire_task.done():     # 그사이 자리를 받았다 — 내보내지 않고 여기서 생성한다
-                    acquired = True
-                    return
                 yield {"type": "retry"}
                 return
             yield {"type": "queued", "position": queue._position(ticket)}
@@ -125,6 +121,9 @@ async def _wait_turn(queue: ChatQueue) -> AsyncIterator[dict]:
             finally:
                 position_changed.cancel()
             if acquire_task.done():
+                if queue.draining:          # 기다리는 사이 교체가 시작됐다 — 받은 자리를 쓰지 않고 넘긴다
+                    yield {"type": "retry"}
+                    return
                 acquired = True
                 return
     finally:
@@ -141,6 +140,10 @@ async def events(request_id: str, messages: list[dict], *,
                  client: httpx.AsyncClient, queue: ChatQueue, model: str) -> AsyncIterator[dict]:
     """이벤트 스트림 — queued* → start → token* → done, 또는 어느 단계에서든 error 하나로 끝."""
     sem = queue.sem
+    if queue.draining:
+        # 교체 중인 서버는 새 생성을 시작하지 않는다(빈 자리가 있어도). 이미 생성 중인 건만 끝까지 간다.
+        yield {"type": "retry"}
+        return
     if sem.locked():
         # aclosing — 연결이 끊겨 이 제너레이터가 닫히면 대기 쪽 정리(자리 반납)도 즉시 실행된다
         async with aclosing(_wait_turn(queue)) as turn:

@@ -266,25 +266,19 @@ def test_new_arrival_at_saturated_draining_queue_is_sent_away_at_once():
     assert queue.waiting_count == 0
 
 
-@respx.mock
-def test_draining_queue_still_serves_when_a_slot_is_free():
-    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(200, content=STREAM_BODY))
-
+def test_draining_queue_does_not_start_new_generation_even_with_a_free_slot():
     async def scenario():
         queue = make_draining_queue()
-        queue.drain()                                          # 대기자 없음 — 정리 중이어도 빈 슬롯이면 처리한다
+        queue.drain()                                          # 빈 슬롯이 있어도 교체 중인 서버는 새 생성을 시작하지 않는다
         async with httpx.AsyncClient(base_url=OLLAMA) as client:
             return await collect(open_events(client, queue)), queue
 
     received, queue = asyncio.run(scenario())
-    assert received[0] == {"type": "start"} and received[-1] == {"type": "done"}
-    assert not queue.sem.locked()
+    assert received == [{"type": "retry"}]
+    assert not queue.sem.locked() and queue.waiting_count == 0
 
 
-@respx.mock
-def test_waiter_that_already_got_the_slot_generates_instead_of_being_sent_away():
-    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(200, content=STREAM_BODY))
-
+def test_waiter_that_got_the_slot_after_drain_is_sent_away_and_returns_the_slot():
     async def scenario():
         queue = make_draining_queue(drain_spacing=0.05)
         await queue.sem.acquire()
@@ -292,10 +286,50 @@ def test_waiter_that_already_got_the_slot_generates_instead_of_being_sent_away()
             waiter = open_events(client, queue)
             assert await waiter.__anext__() == {"type": "queued", "position": 1}
             queue.drain()
-            queue.sem.release()                                # 내보내기 직전에 슬롯이 났다
+            queue.sem.release()                                # 내보내기 직전에 슬롯이 났다 — 그래도 여기서 시작하지 않는다
             return await collect(waiter), queue
 
     received, queue = asyncio.run(scenario())
-    assert {"type": "retry"} not in received
-    assert received[0] == {"type": "start"} and received[-1] == {"type": "done"}
-    assert not queue.sem.locked() and queue.waiting_count == 0
+    assert received == [{"type": "retry"}]
+    assert not queue.sem.locked() and queue.waiting_count == 0  # 받았던 자리도 반납
+
+
+@respx.mock
+def test_generation_already_running_finishes_after_drain():
+    respx.post(f"{OLLAMA}/api/chat").mock(return_value=httpx.Response(200, content=STREAM_BODY))
+
+    async def scenario():
+        queue = make_draining_queue()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            running = open_events(client, queue)
+            assert await running.__anext__() == {"type": "start"}     # 생성이 시작됐다
+            queue.drain()
+            return await collect(running), queue
+
+    received, queue = asyncio.run(scenario())
+    assert received == [{"type": "token", "text": "a"}, {"type": "token", "text": "b"}, {"type": "done"}]
+    assert not queue.sem.locked()
+
+
+def test_drain_releases_waiters_with_spacing():
+    async def scenario():
+        queue = make_draining_queue(drain_spacing=0.1)
+        await queue.sem.acquire()
+        async with httpx.AsyncClient(base_url=OLLAMA) as client:
+            generators = [open_events(client, queue) for _ in range(3)]
+            for generator in generators:
+                await generator.__anext__()
+            started = asyncio.get_running_loop().time()
+            queue.drain()
+            times = []
+
+            async def finish(generator):
+                await collect(generator)
+                times.append(asyncio.get_running_loop().time() - started)
+
+            await asyncio.gather(*(finish(generator) for generator in generators))
+        return times
+
+    times = asyncio.run(scenario())
+    gaps = [later - earlier for earlier, later in zip(times, times[1:])]
+    assert all(gap >= 0.08 for gap in gaps), f"대기자를 간격 없이 내보냈다: {times}"
